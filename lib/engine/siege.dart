@@ -126,22 +126,62 @@ class WallSegment {
   final double x1, y1, x2, y2;
   /// Czy ten fragment ma bramę (można ją staranować)?
   final bool hasGate;
-  /// Wytrzymałość 0..1. Poniżej 0 = wyłom.
+  /// Wytrzymałość 0..1. Poniżej 0 = całkowity wyłom segmentu.
   double integrity;
+  /// Lokalne wyrwy: lista (środek_x, szerokość) — dziury wybite katapultą/taranem.
+  final List<(double, double)> breaches;
+  /// Punkty z drabinami: x-owe pozycje gdzie można się wspiąć.
+  final List<double> ladderPoints;
 
   WallSegment({
     required this.x1, required this.y1,
     required this.x2, required this.y2,
     this.hasGate = false,
     this.integrity = 1.0,
-  });
+    List<(double, double)>? breaches,
+    List<double>? ladderPoints,
+  })  : breaches = breaches ?? [],
+        ladderPoints = ladderPoints ?? [];
 
+  double get length => (x2 - x1).abs();
+
+  /// Cały segment zburzony (rzadkie — normalnie robimy lokalne wyrwy).
   bool get isBreached => integrity <= 0;
+
+  /// Czy w danym punkcie x jest przejście (wyrwa albo drabina)?
+  bool hasOpeningAt(double px) {
+    if (isBreached) return true;
+    for (final (cx, w) in breaches) {
+      if ((px - cx).abs() <= w / 2) return true;
+    }
+    for (final lx in ladderPoints) {
+      if ((px - lx).abs() <= 20) return true; // drabina = wąskie przejście
+    }
+    return false;
+  }
+
+  /// Dodaje lokalną wyrwę o zadanej szerokości w punkcie x.
+  void addBreach(double centerX, double width) {
+    breaches.add((centerX, width));
+  }
 
   /// Czy segment blokuje ruch między punktami?
   bool blocksMovement(double ax, double ay, double bx, double by) {
     if (isBreached) return false;
-    return _segmentsIntersect(ax, ay, bx, by, x1, y1, x2, y2);
+    if (!_segmentsIntersect(ax, ay, bx, by, x1, y1, x2, y2)) return false;
+    // Sprawdź czy linia przechodzi przez wyrwę/drabinę (przecięcie na wysokości muru)
+    final crossX = _intersectionX(ax, ay, bx, by);
+    if (crossX != null && hasOpeningAt(crossX)) return false;
+    return true;
+  }
+
+  /// X w którym odcinek a→b przecina poziomą linię muru (y1). null jeśli brak.
+  double? _intersectionX(double ax, double ay, double bx, double by) {
+    if ((ay < y1 && by < y1) || (ay > y1 && by > y1)) return null;
+    if ((by - ay).abs() < 0.001) return null;
+    final t = (y1 - ay) / (by - ay);
+    if (t < 0 || t > 1) return null;
+    return ax + (bx - ax) * t;
   }
 
   static bool _segmentsIntersect(

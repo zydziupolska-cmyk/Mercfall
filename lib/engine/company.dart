@@ -86,46 +86,26 @@ extension CaptainPerkInfo on CaptainPerk {
 
 class Captain {
   String name;
-  int level;
-  int xp;
-  /// Wybrane perki. Poziom 1 = 1 perk, poziom 3 = 2 perki, poziom 5 = 3 perki.
-  final List<CaptainPerk> perks;
+  /// Jeden perk na całe życie kapitana (null = zwykły dowódca).
+  /// Przypisywany w koszarach z puli kompanii. Ginie z plutonem.
+  CaptainPerk? perk;
 
   Captain({
     required this.name,
-    this.level = 1,
-    this.xp = 0,
-    List<CaptainPerk>? perks,
-  }) : perks = perks ?? [];
+    this.perk,
+  });
 
-  /// Ile perków kapitan może mieć na obecnym poziomie.
-  int get perkSlots => level >= 5 ? 3 : (level >= 3 ? 2 : 1);
-  bool get hasFreeSlot => perks.length < perkSlots;
-
-  int get xpToNextLevel => level * 40;
-  bool get canLevelUp => xp >= xpToNextLevel;
-
-  void addXp(int amount) {
-    xp += amount;
-    while (canLevelUp) {
-      xp -= xpToNextLevel;
-      level++;
-    }
-  }
-
-  bool hasPerk(CaptainPerk p) => perks.contains(p);
+  bool get hasPerk => perk != null;
+  bool hasPerkOf(CaptainPerk p) => perk == p;
 
   Map<String, dynamic> toJson() => {
-    'name': name, 'level': level, 'xp': xp,
-    'perks': perks.map((p) => p.index).toList(),
+    'name': name,
+    'perk': perk?.index,
   };
 
   static Captain fromJson(Map<String, dynamic> j) => Captain(
-    name:  j['name'] as String,
-    level: j['level'] as int? ?? 1,
-    xp:    j['xp']    as int? ?? 0,
-    perks: ((j['perks'] as List?) ?? [])
-        .map((i) => CaptainPerk.values[i as int]).toList(),
+    name: j['name'] as String,
+    perk: j['perk'] != null ? CaptainPerk.values[j['perk'] as int] : null,
   );
 
   /// Losowe imiona dla nowo mianowanych kapitanów.
@@ -216,7 +196,7 @@ class CompanyPlatoon {
     troops.forEach((tierIdx, c) {
       sum += TroopTier.values[tierIdx].dailyWage * c;
     });
-    if (captain?.hasPerk(CaptainPerk.quartermaster) ?? false) sum *= 0.70;
+    if (captain?.hasPerkOf(CaptainPerk.quartermaster) ?? false) sum *= 0.70;
     return sum.round();
   }
 
@@ -224,26 +204,26 @@ class CompanyPlatoon {
   // Używane przez BattleSimulation. Bez kapitana wszystkie = neutralne.
 
   double get dmgMultiplier =>
-      (captain?.hasPerk(CaptainPerk.veteranFighter) ?? false) ? 1.22 : 1.0;
+      (captain?.hasPerkOf(CaptainPerk.veteranFighter) ?? false) ? 1.22 : 1.0;
 
   double get damageTakenMultiplier =>
-      (captain?.hasPerk(CaptainPerk.thickHide) ?? false) ? 0.86 : 1.0;
+      (captain?.hasPerkOf(CaptainPerk.thickHide) ?? false) ? 0.86 : 1.0;
 
   double get moraleLossMultiplier =>
-      (captain?.hasPerk(CaptainPerk.ironWill) ?? false) ? 0.50 : 1.0;
+      (captain?.hasPerkOf(CaptainPerk.ironWill) ?? false) ? 0.50 : 1.0;
 
   double get speedMultiplier =>
-      (captain?.hasPerk(CaptainPerk.cavalryCharge) ?? false) ? 1.30 : 1.0;
+      (captain?.hasPerkOf(CaptainPerk.cavalryCharge) ?? false) ? 1.30 : 1.0;
 
   double get rangeMultiplier =>
-      (captain?.hasPerk(CaptainPerk.keenEye) ?? false) ? 1.25 : 1.0;
+      (captain?.hasPerkOf(CaptainPerk.keenEye) ?? false) ? 1.25 : 1.0;
 
   /// Mnożnik siły osłony terenu (Mur tarcz podwaja efekt osłony).
   double get coverStrength =>
-      (captain?.hasPerk(CaptainPerk.shieldWall) ?? false) ? 2.0 : 1.0;
+      (captain?.hasPerkOf(CaptainPerk.shieldWall) ?? false) ? 2.0 : 1.0;
 
   double get xpMultiplier =>
-      (captain?.hasPerk(CaptainPerk.drillmaster) ?? false) ? 1.50 : 1.0;
+      (captain?.hasPerkOf(CaptainPerk.drillmaster) ?? false) ? 1.50 : 1.0;
 
   // ── Zarządzanie składem ──────────────────────────────────────────────────
 

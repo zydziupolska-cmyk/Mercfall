@@ -5,6 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'army.dart';
 import 'company.dart';
 import 'contracts.dart';
+import 'perks.dart';
+import 'tutorial.dart';
 import 'crafting.dart';
 import 'equipment.dart';
 import 'factions.dart';
@@ -22,7 +24,7 @@ class CampaignState extends ChangeNotifier {
   static const _saveKey = 'mercfall_v1';
 
   // ── Zasoby ─────────────────────────────────────────────────────────
-  int gold = 150;
+  int gold = 10;
   int day = 1;
 
   // ── Armia ──────────────────────────────────────────────────────────
@@ -58,8 +60,9 @@ class CampaignState extends ChangeNotifier {
   int platoonActive(CompanyPlatoon p) =>
       p.activeCount(woundedByTier(p.type));
 
-  int get totalDailyWage =>
+  int get _rawDailyWage =>
       platoons.fold(0, (s, p) => s + p.dailyWage);
+  int get totalDailyWage => (_rawDailyWage * perks.wageMult).round();
 
   // ── Formacje ───────────────────────────────────────────────────────
   /// Pierwsze 4 to presety (nie usuwalne), reszta to niestandardowe gracza.
@@ -106,8 +109,13 @@ class CampaignState extends ChangeNotifier {
       settlementId: s.id, type: s.type, name: s.name,
       idleWorkers: survivors);
     ownedSettlements.add(owned);
+    if (s.type == SettlementType.city) {
+      _gainPerk(perks.advance(CompanyPerk.siegeMasters, 1));
+    }
+    _gainPerk(perks.setProgress(CompanyPerk.quartermaster,
+        ownedSettlements.length));
     notifyListeners();
-    save();
+    saveNow();
     return owned;
   }
 
@@ -126,7 +134,7 @@ class CampaignState extends ChangeNotifier {
       o.idleWorkers += give;
     }
     notifyListeners();
-    save();
+    saveNow();
     return true;
   }
 
@@ -143,7 +151,7 @@ class CampaignState extends ChangeNotifier {
     }
     o.buildings.add(OwnedBuilding(kind: kind));
     notifyListeners();
-    save();
+    saveNow();
     return true;
   }
 
@@ -152,21 +160,23 @@ class CampaignState extends ChangeNotifier {
     gold -= b.upgradeCost;
     b.level++;
     notifyListeners();
-    save();
+    saveNow();
     return true;
   }
 
   /// Nalicza produkcję ze wszystkich osad. Zwraca zebrane surowce.
   Map<Resource, int> collectAllProduction() {
     final total = <Resource, int>{};
+    final bonus = perks.productionMult; // Kwatermistrz +20%
     for (final o in ownedSettlements) {
       final gained = o.collectProduction(resourceStock);
       gained.forEach((res, amt) {
-        total[res] = (total[res] ?? 0) + amt;
-        resourceStock[res.index] = resourceCount(res) + amt;
+        final boosted = (amt * bonus).round();
+        total[res] = (total[res] ?? 0) + boosted;
+        resourceStock[res.index] = resourceCount(res) + boosted;
       });
     }
-    if (total.isNotEmpty) { notifyListeners(); save(); }
+    if (total.isNotEmpty) { notifyListeners(); saveNow(); }
     return total;
   }
 
@@ -179,7 +189,7 @@ class CampaignState extends ChangeNotifier {
     final earned = take * r.sellPrice;
     gold += earned;
     notifyListeners();
-    save();
+    saveNow();
     return earned;
   }
 
@@ -228,7 +238,7 @@ class CampaignState extends ChangeNotifier {
     final rel = relationWith(f);
     rel.standing = (rel.standing + delta).clamp(-100, 150);
     notifyListeners();
-    save();
+    saveNow();
   }
 
   /// Rejestruje zdobycie osady frakcji.
@@ -247,7 +257,7 @@ class CampaignState extends ChangeNotifier {
     // Jeśli służyłeś tej frakcji, tracisz przysięgę
     if (allegiance == s.faction) allegiance = Faction.none;
     notifyListeners();
-    save();
+    saveNow();
   }
 
   /// Czy stolica tej frakcji jest już dostępna do szturmu.
@@ -266,7 +276,7 @@ class CampaignState extends ChangeNotifier {
     changeStanding(f, 20);
     reputation += 15;
     notifyListeners();
-    save();
+    saveNow();
   }
 
   void breakAllegiance() {
@@ -275,7 +285,7 @@ class CampaignState extends ChangeNotifier {
     if (old != Faction.none) changeStanding(old, -50);
     reputation = (reputation - 10).clamp(0, 9999);
     notifyListeners();
-    save();
+    saveNow();
   }
 
   /// Ile osad danej frakcji już masz.
@@ -287,6 +297,43 @@ class CampaignState extends ChangeNotifier {
 
   // ── Najazdy na osady ──────────────────────────────────────────────────
   late RaidManager raids;
+  final PerkTracker perks = PerkTracker();
+
+  // ── Samouczek (pierwsze zadania) ──────────────────────────────────────
+  TutorialStep tutorialStep = TutorialStep.enterSettlement;
+  /// Ile darmowych sztuk jedzenia zostało (samouczek).
+  int freeFoodLeft = 3;
+  bool get tutorialActive => tutorialStep != TutorialStep.done;
+  /// Krok właśnie ukończony (do powiadomienia).
+  TutorialStep? justCompletedStep;
+
+  /// Zalicza krok samouczka jeśli pasuje do aktualnego. Zwraca true jeśli
+  /// nastąpił postęp (do pokazania powiadomienia/nagrody).
+  bool _advanceTutorial(TutorialStep step) {
+    if (tutorialStep != step) return false;
+    final reward = step.goldReward;
+    if (reward > 0) gold += reward;
+    justCompletedStep = step;
+    tutorialStep = step.next;
+    notifyListeners();
+    saveNow();
+    return true;
+  }
+
+  TutorialStep? consumeCompletedStep() {
+    final s = justCompletedStep;
+    justCompletedStep = null;
+    return s;
+  }
+
+  /// Wywoływane z UI: gracz wszedł do osady (krok 1).
+  void tutorialEnteredSettlement() =>
+      _advanceTutorial(TutorialStep.enterSettlement);
+
+  /// Wywoływane z UI: gracz przyjął zlecenie (krok 4).
+  void tutorialTookContract() =>
+      _advanceTutorial(TutorialStep.takeContract);
+  CompanyPerk? lastUnlockedPerk;
   /// Wyniki i zapowiedzi z ostatniego endDay — do pokazania w UI.
   List<RaidOutcome> _lastRaidOutcomes = [];
   List<SettlementRaid> _lastAnnouncedRaids = [];
@@ -316,7 +363,7 @@ class CampaignState extends ChangeNotifier {
       o.idleWorkers += give;
     }
     notifyListeners();
-    save();
+    saveNow();
     return true;
   }
 
@@ -349,8 +396,19 @@ class CampaignState extends ChangeNotifier {
         reputation = (reputation - 10).clamp(0, 9999);
       }
     }
-    if (outcomes.isNotEmpty) { notifyListeners(); save(); }
+    if (outcomes.isNotEmpty) { notifyListeners(); saveNow(); }
     return outcomes;
+  }
+
+  /// Zapisuje świeżo zdobyty perk do powiadomienia.
+  void _gainPerk(CompanyPerk? p) {
+    if (p != null) lastUnlockedPerk = p;
+  }
+
+  CompanyPerk? consumeUnlockedPerk() {
+    final p = lastUnlockedPerk;
+    lastUnlockedPerk = null;
+    return p;
   }
 
   // ── Kontrakty i reputacja ─────────────────────────────────────────────
@@ -384,25 +442,43 @@ class CampaignState extends ChangeNotifier {
   /// Zlecenia oferowane w danej osadzie (odświeżane co 4 dni).
   List<Contract> contractsAt(Settlement s, Random rng) {
     final lastRefresh = _contractsRefreshedOn[s.id] ?? -99;
-    final needsRefresh = day - lastRefresh >= 4;
+    final currentActive = activeContracts
+        .where((ct) => ct.giverSettlementId == s.id && ct.isActive)
+        .toList();
+    // Odśwież gdy minęły 3 dni ALBO gdy nie ma już żadnych aktywnych ofert
+    // (np. wszystkie podjęte/ukończone) — inaczej wracasz do pustej wioski.
+    final needsRefresh = day - lastRefresh >= 3 ||
+        currentActive.where((ct) => !_taken.contains(ct.id)).isEmpty;
     if (needsRefresh) {
       // Usuń stare, niepodjęte oferty z tej osady
       activeContracts.removeWhere((ct) =>
           ct.giverSettlementId == s.id && !ct.completed && !_taken.contains(ct.id));
       _contractsRefreshedOn[s.id] = day;
-      final count = 1 + rng.nextInt(3);
-      for (var i = 0; i < count; i++) {
+      final count = 2 + rng.nextInt(2);
+      final usedTargets = <String>{}; // unikaj duplikatów w tej ofercie
+      var attempts = 0;
+      var made = 0;
+      while (made < count && attempts < 20) {
+        attempts++;
         _contractCounter++;
-        activeContracts.add(Contract.generate(
+        final ct = Contract.generate(
           giver: s,
           allSettlements: worldMap.settlements,
           banditNames: bandits.parties.map((b) => b.name).toList(),
           currentDay: day,
           rng: rng,
           counter: _contractCounter,
-        ));
+          worldW: WorldMap.worldW,
+          worldH: WorldMap.worldH,
+        );
+        // Klucz unikalności: typ + cel
+        final key = '${ct.kind.index}:${ct.targetName}:${ct.targetId ?? ""}';
+        if (usedTargets.contains(key)) continue;
+        usedTargets.add(key);
+        activeContracts.add(ct);
+        made++;
       }
-      save();
+      saveNow();
     }
     return activeContracts
         .where((ct) => ct.giverSettlementId == s.id && ct.isActive)
@@ -426,7 +502,7 @@ class CampaignState extends ChangeNotifier {
   void acceptContract(Contract ct) {
     _taken.add(ct.id);
     notifyListeners();
-    save();
+    saveNow();
   }
 
   void abandonContract(Contract ct) {
@@ -439,13 +515,14 @@ class CampaignState extends ChangeNotifier {
       changeStanding(giver.first.faction, -4);
     }
     notifyListeners();
-    save();
+    saveNow();
   }
 
   /// Rozlicza ukończone zlecenie.
   void completeContract(Contract ct) {
     if (ct.completed) return;
     ct.completed = true;
+    _gainPerk(perks.advance(CompanyPerk.leanCoffers, 1));
     _taken.remove(ct.id);
     // Frakcja zleceniodawcy płaci wg swojego zwyczaju
     final giver = worldMap.settlements
@@ -456,7 +533,7 @@ class CampaignState extends ChangeNotifier {
     // Reputacja u konkretnej frakcji
     if (f != Faction.none) changeStanding(f, ct.rewardReputation);
     notifyListeners();
-    save();
+    saveNow();
   }
 
   /// Sprawdza przeterminowane zlecenia (wywoływane przy odpoczynku).
@@ -470,15 +547,94 @@ class CampaignState extends ChangeNotifier {
         expired.add(ct);
       }
     }
-    if (expired.isNotEmpty) { notifyListeners(); save(); }
+    if (expired.isNotEmpty) { notifyListeners(); saveNow(); }
     return expired;
   }
 
   /// Zgłasza rozbicie bandy — zalicza pasujące zlecenia.
+  /// Zalicza zlecenia wymagające wygranej bitwy na konkretnej lokacji:
+  /// sabotaż (napad na obcą wioskę) i odbicie jeńców (ruiny).
+  /// Wywoływane po wygranej bitwie przy osadzie [settlementId].
+  List<Contract> reportBattleWonAt(String settlementId) {
+    final done = <Contract>[];
+    for (final ct in takenContracts.toList()) {
+      if (ct.targetId != settlementId) continue;
+      if (ct.kind == ContractKind.sabotage ||
+          ct.kind == ContractKind.rescueCaptives) {
+        completeContract(ct);
+        if (ct.kind == ContractKind.sabotage) {
+          final s = worldMap.settlements
+              .where((x) => x.id == settlementId).toList();
+          if (s.isNotEmpty && s.first.faction != Faction.none) {
+            changeStanding(s.first.faction, -25);
+          }
+        }
+        done.add(ct);
+      }
+    }
+    return done;
+  }
+
+  /// Sprawdza zlecenie poboru podatków przy dotarciu do wioski-celu.
+  /// Zwraca zlecenie jeśli WYMAGA walki z garnizonem (standing za niski),
+  /// null jeśli wioska zapłaciła od razu (standing wystarczający).
+  Contract? checkTaxCollection(String settlementId) {
+    for (final ct in takenContracts) {
+      if (ct.kind != ContractKind.collectTax) continue;
+      if (ct.targetId != settlementId || ct.taxCollected) continue;
+      final s = worldMap.settlements
+          .where((x) => x.id == settlementId).toList();
+      if (s.isEmpty) continue;
+      final faction = s.first.faction;
+      final rel = faction == Faction.none ? null : relationWith(faction);
+      final stance = rel?.stance ?? FactionStance.neutral;
+      // Przychylność (friendly) lub wyżej → płacą bez oporu
+      final peaceful = stance == FactionStance.friendly ||
+          stance == FactionStance.allied ||
+          stance == FactionStance.sworn;
+      if (peaceful) {
+        ct.taxCollected = true; // zebrane pokojowo
+        notifyListeners();
+        saveNow();
+        return null;
+      }
+      return ct; // trzeba walczyć z wartą
+    }
+    return null;
+  }
+
+  /// Po wygranej walce z wartą przy poborze — oznacza podatek jako zebrany.
+  void collectTaxByForce(Contract ct) {
+    if (ct.kind == ContractKind.collectTax) {
+      ct.taxCollected = true;
+      notifyListeners();
+      saveNow();
+    }
+  }
+
+  /// Sprawdza zlecenie przynęty: walka z bandą blisko (320j) miasta-celu.
+  /// Zwraca zlecenia zaliczone (do pokazania komunikatu).
+  List<Contract> checkBaitBattle(double battleX, double battleY) {
+    final done = <Contract>[];
+    for (final ct in takenContracts.toList()) {
+      if (ct.kind != ContractKind.bait) continue;
+      final s = worldMap.settlements
+          .where((x) => x.id == ct.targetId).toList();
+      if (s.isEmpty) continue;
+      final dx = s.first.x - battleX, dy = s.first.y - battleY;
+      if (dx * dx + dy * dy < 320 * 320) {
+        completeContract(ct);
+        done.add(ct);
+      }
+    }
+    return done;
+  }
+
   List<Contract> reportBanditsKilled(String banditName) {
     final done = <Contract>[];
     for (final ct in takenContracts) {
-      if (ct.kind == ContractKind.clearBandits &&
+      if ((ct.kind == ContractKind.clearBandits ||
+           ct.kind == ContractKind.huntBounty) &&
           ct.targetName == banditName) {
         completeContract(ct);
         done.add(ct);
@@ -487,14 +643,110 @@ class CampaignState extends ChangeNotifier {
     return done;
   }
 
+  /// Sprawdza warunki zleceń szkoleniowych po wygranej bitwie.
+  /// Zwraca perki kapitanów dodane do puli (do powiadomienia w UI).
+  List<CaptainPerk> checkTrainingConditions({
+    required int scenario,        // BattleScenario.index (1=wioska, 2=miasto)
+    required bool lostAny,        // straciłeś żołnierza?
+    required bool wasOutnumbered, // wróg miał więcej ludzi?
+    required bool archerMajority, // łucznicy większością?
+    required bool wasChasePursuit,// walka po pościgu?
+  }) {
+    final earned = <CaptainPerk>[];
+    for (final ct in takenContracts.toList()) {
+      if (ct.kind != ContractKind.training || ct.rewardPerkIndex == null) {
+        continue;
+      }
+      var met = false;
+      switch (ct.trainingCond) {
+        case TrainingCond.noLosses:      met = !lostAny;
+        case TrainingCond.outnumbered:   met = wasOutnumbered;
+        case TrainingCond.wonSiege:      met = scenario == 2;
+        case TrainingCond.wonVillage:    met = scenario == 1;
+        case TrainingCond.caughtFleeing: met = wasChasePursuit;
+        case TrainingCond.archerHeavy:   met = archerMajority;
+        default: met = false;
+      }
+      if (met) {
+        completeContract(ct);
+        final perk = CaptainPerk.values[ct.rewardPerkIndex!];
+        captainPerkPool.add(perk.index);
+        earned.add(perk);
+      }
+    }
+    if (earned.isNotEmpty) { notifyListeners(); saveNow(); }
+    return earned;
+  }
+
+  /// Odkrywa ukryty cel (karawana/herszt) gdy gracz podejdzie na 200j.
+  List<Contract> checkAreaReveal(double px, double py) {
+    final revealed = <Contract>[];
+    for (final ct in takenContracts) {
+      if (!ct.hasSearchArea || ct.revealed) continue;
+      final dx = ct.targetX - px, dy = ct.targetY - py;
+      if (dx * dx + dy * dy < 200 * 200) {
+        ct.revealed = true;
+        revealed.add(ct);
+        _gainPerk(perks.advance(CompanyPerk.foragers, 1));
+      }
+    }
+    if (revealed.isNotEmpty) { notifyListeners(); saveNow(); }
+    return revealed;
+  }
+
+  /// Dotarcie do odkrytej karawany (60j) → ukończenie.
+  /// Dotarcie do odkrytego celu obszarowego.
+  /// Karawana → ukończenie od razu. Herszt → sygnał do walki (zwrócony osobno).
+  List<Contract> checkAreaArrival(double px, double py) {
+    final done = <Contract>[];
+    for (final ct in takenContracts.toList()) {
+      if (!ct.revealed) continue;
+      final dx = ct.targetX - px, dy = ct.targetY - py;
+      if (dx * dx + dy * dy >= 60 * 60) continue;
+
+      if (ct.kind == ContractKind.findCaravan) {
+        completeContract(ct);
+        done.add(ct);
+      }
+      // huntBounty obsługiwane osobno przez bountyBattleReady()
+    }
+    return done;
+  }
+
+  /// Zwraca zlecenie listu gończego którego cel został osiągnięty
+  /// (gracz przy odkrytym hersztzie) — do rozpoczęcia walki.
+  Contract? bountyBattleReady(double px, double py) {
+    for (final ct in takenContracts) {
+      if (ct.kind != ContractKind.huntBounty || !ct.revealed) continue;
+      final dx = ct.targetX - px, dy = ct.targetY - py;
+      if (dx * dx + dy * dy < 60 * 60) return ct;
+    }
+    return null;
+  }
+
+  /// Po wygranej walce z hersztem — zalicza zlecenie listu gończego.
+  void completeBounty(Contract ct) {
+    if (ct.kind == ContractKind.huntBounty) completeContract(ct);
+  }
+
   /// Zgłasza przybycie do osady — zalicza dostawy i zwiady.
   List<Contract> reportArrival(Settlement s) {
     final done = <Contract>[];
     for (final ct in takenContracts.toList()) {
+      // Pobór podatków — przyniesienie zebranego złota do ZLECENIODAWCY
+      if (ct.kind == ContractKind.collectTax &&
+          ct.giverSettlementId == s.id && ct.taxCollected) {
+        // Gracz zatrzymuje 30% zebranego podatku (poza nagrodą bazową)
+        gold += (ct.taxAmount * 0.3).round();
+        completeContract(ct);
+        done.add(ct);
+        continue;
+      }
       if (ct.targetId != s.id) continue;
       switch (ct.kind) {
         case ContractKind.escortGoods:
         case ContractKind.scoutRuins:
+        case ContractKind.deliverUrgent:
           completeContract(ct);
           done.add(ct);
         case ContractKind.supplyGrain:
@@ -504,7 +756,24 @@ class CampaignState extends ChangeNotifier {
             completeContract(ct);
             done.add(ct);
           } else {
-            // Za mało towaru — zapamiętaj by powiedzieć graczowi
+            _blockedDelivery = ct;
+          }
+        case ContractKind.supplyIngots:
+          if (resourceCount(Resource.ingot) >= ct.cargoAmount) {
+            resourceStock[Resource.ingot.index] =
+                resourceCount(Resource.ingot) - ct.cargoAmount;
+            completeContract(ct);
+            done.add(ct);
+          } else {
+            _blockedDelivery = ct;
+          }
+        case ContractKind.supplyHides:
+          if (resourceCount(Resource.hide) >= ct.cargoAmount) {
+            resourceStock[Resource.hide.index] =
+                resourceCount(Resource.hide) - ct.cargoAmount;
+            completeContract(ct);
+            done.add(ct);
+          } else {
             _blockedDelivery = ct;
           }
         default:
@@ -532,7 +801,7 @@ class CampaignState extends ChangeNotifier {
   void markRuinsLooted(String settlementId) {
     ruinsLootedOn[settlementId] = day;
     notifyListeners();
-    save();
+    saveNow();
   }
 
   // ── Pobór z własnych osad (jedna pula ludności) ───────────────────────
@@ -565,7 +834,7 @@ class CampaignState extends ChangeNotifier {
     army.recruit(UnitType.peasant, TroopTier.recruit, recruited, 999999);
     campaignMorale = (campaignMorale - recruited * 0.6).clamp(0.0, 100.0);
     notifyListeners();
-    save();
+    saveNow();
     return recruited;
   }
 
@@ -597,7 +866,7 @@ class CampaignState extends ChangeNotifier {
     o.idleWorkers += take;
     reconcilePlatoons();
     notifyListeners();
-    save();
+    saveNow();
     return take;
   }
 
@@ -629,7 +898,7 @@ class CampaignState extends ChangeNotifier {
     o.idleWorkers += take;
     reconcilePlatoons();
     notifyListeners();
-    save();
+    saveNow();
     return take;
   }
 
@@ -705,7 +974,7 @@ class CampaignState extends ChangeNotifier {
     gold -= n * smeltFee;
     resourceStock[Resource.ingot.index] = resourceCount(Resource.ingot) + n;
     notifyListeners();
-    save();
+    saveNow();
     return n;
   }
 
@@ -719,7 +988,7 @@ class CampaignState extends ChangeNotifier {
     gold -= n * tanFee;
     resourceStock[Resource.leather.index] = resourceCount(Resource.leather) + n;
     notifyListeners();
-    save();
+    saveNow();
     return n;
   }
 
@@ -745,7 +1014,7 @@ class CampaignState extends ChangeNotifier {
       speedMult: b.craftSpeed,
     ));
     notifyListeners();
-    save();
+    saveNow();
     return true;
   }
 
@@ -756,9 +1025,9 @@ class CampaignState extends ChangeNotifier {
       for (final b in o.buildings) {
         if (!b.kind.isWorkshop) continue;
         final finished = b.craftQueue
-            .where((order) => (order as CraftOrder).isDone).toList();
+            .where((order) => order.isDone).toList();
         for (final order in finished) {
-          final co = order as CraftOrder;
+          final co = order;
           final eng = co.item.producesEngine;
           final eq  = co.item.producesEquipment;
           if (eng != null) {
@@ -771,14 +1040,14 @@ class CampaignState extends ChangeNotifier {
         }
       }
     }
-    if (done.isNotEmpty) { notifyListeners(); save(); }
+    if (done.isNotEmpty) { notifyListeners(); saveNow(); }
     return done;
   }
 
   /// Anuluje zlecenie (surowce przepadają).
   bool cancelCraft(OwnedBuilding b, CraftOrder order) {
     final removed = b.craftQueue.remove(order);
-    if (removed) { notifyListeners(); save(); }
+    if (removed) { notifyListeners(); saveNow(); }
     return removed;
   }
 
@@ -791,7 +1060,7 @@ class CampaignState extends ChangeNotifier {
               : roll < 0.92 ? SiegeEngine.ram
               : SiegeEngine.catapult;
     addSiegeEngine(eng, 1);
-    save();
+    saveNow();
     return eng;
   }
 
@@ -853,8 +1122,9 @@ class CampaignState extends ChangeNotifier {
   int foodUnits(FoodType t) => foodStock[t.index] ?? 0;
   int get totalFoodUnits =>
       FoodType.values.fold(0, (s, t) => s + foodUnits(t));
-  /// Ile jednostek jedzenia armia zużywa dziennie.
-  int get dailyFoodNeeded => dailyFoodUnits(army.totalActive);
+  /// Ile jednostek jedzenia armia zużywa dziennie (z perkiem Zwiadowcy −25%).
+  int get dailyFoodNeeded =>
+      (dailyFoodUnits(army.totalActive) * perks.foodMult).ceil();
   /// Na ile dni starczy aktualny zapas (najlepsze jedzenie pierwsze).
   int get daysOfFood {
     var remaining = totalFoodUnits;
@@ -879,7 +1149,7 @@ class CampaignState extends ChangeNotifier {
   // ── Inicjalizacja ───────────────────────────────────────────────────
   static Future<CampaignState> loadOrNew() async {
     final state = CampaignState();
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = _prefsCache ??= await SharedPreferences.getInstance();
     final raw = prefs.getString(_saveKey);
     if (raw != null) {
       state._loadJson(jsonDecode(raw) as Map<String, dynamic>);
@@ -889,12 +1159,42 @@ class CampaignState extends ChangeNotifier {
     return state;
   }
 
+  /// Czy istnieje zapisana gra (do decyzji "Kontynuuj" vs "Nowa gra").
+  static Future<bool> hasSave() async {
+    final prefs = _prefsCache ??= await SharedPreferences.getInstance();
+    // Odśwież z dysku — cache w pamięci mógł się rozjechać z rzeczywistością
+    await prefs.reload();
+    final raw = prefs.getString(_saveKey);
+    return raw != null && raw.isNotEmpty;
+  }
+
+  /// Wczytuje istniejący zapis (zakłada że hasSave() == true).
+  static Future<CampaignState> loadExisting() async {
+    final state = CampaignState();
+    final prefs = _prefsCache ??= await SharedPreferences.getInstance();
+    final raw = prefs.getString(_saveKey);
+    if (raw != null) {
+      state._loadJson(jsonDecode(raw) as Map<String, dynamic>);
+    } else {
+      state._bootstrap();
+    }
+    return state;
+  }
+
+  /// Tworzy świeżą kampanię od zera (kasuje stary zapis).
+  static Future<CampaignState> newGame() async {
+    final prefs = _prefsCache ??= await SharedPreferences.getInstance();
+    await prefs.remove(_saveKey);
+    final state = CampaignState();
+    state._bootstrap();
+    await state.save();
+    return state;
+  }
+
   void _bootstrap() {
     // Startowa armia — jak w M&B: mały ale kompletny oddział
     army.stacks.addAll([
-      TroopStack(type: UnitType.infantry, tier: TroopTier.recruit, count: 12),
-      TroopStack(type: UnitType.archers,  tier: TroopTier.recruit, count: 6),
-      TroopStack(type: UnitType.cavalry,  tier: TroopTier.recruit, count: 4),
+      TroopStack(type: UnitType.infantry, tier: TroopTier.recruit, count: 5),
     ]);
     formations.addAll(PresetFormations.all());
     _bootstrapPlatoons();
@@ -946,6 +1246,7 @@ class CampaignState extends ChangeNotifier {
     gold -= recruited * unitCost;
     _recordPurchase('${s.id}:rc${type.index}', recruited);
     notifyListeners();
+    saveNow();
     return true;
   }
 
@@ -968,21 +1269,18 @@ class CampaignState extends ChangeNotifier {
     army.applyBattleResult(casualties);
     reconcilePlatoons();
     gold += lootGold;
-    if (victory) { battlesWon++; } else { battlesLost++; }
+    if (victory) {
+      battlesWon++;
+      _gainPerk(perks.advance(CompanyPerk.ironDiscipline, 1));
+      _advanceTutorial(TutorialStep.firstBattle);
+    } else { battlesLost++; }
 
-    // Kapitanowie zdobywają XP za bitwę
-    for (final p in platoons) {
-      final cap = p.captain;
-      if (cap == null) continue;
-      final baseXp = victory ? 20 : 5;
-      final xp = (baseXp * p.xpMultiplier).round();
-      cap.addXp(xp);
-    }
     notifyListeners();
   }
 
   /// Odpoczynek po dniu — płaci żołd, ranni wracają.
   bool endDay() {
+    _advanceTutorial(TutorialStep.firstRest);
     // Żołd z plutonów (uwzględnia perk Kwatermistrz), fallback na armię
     final workerUpkeep =
         ownedSettlements.fold(0, (s, o) => s + o.dailyUpkeep);
@@ -1033,6 +1331,7 @@ class CampaignState extends ChangeNotifier {
     _lastAnnouncedRaids = raids.rollNewRaids(
         owned: ownedSettlements, day: day, rng: rng);
     notifyListeners();
+    saveNow(); // utrwal cały wynik dnia
     return true;
   }
 
@@ -1069,6 +1368,7 @@ class CampaignState extends ChangeNotifier {
     equipmentStock[e.index] = equipmentCount(e) + affordable;
     _recordPurchase('${s.id}:eq${e.index}', affordable);
     notifyListeners();
+    saveNow();
     return affordable;
   }
 
@@ -1100,7 +1400,7 @@ class CampaignState extends ChangeNotifier {
     equipmentStock[equip.index] = eqAvail - take;
     army.stacks.removeWhere((s) => s.count <= 0 && s.wounded <= 0);
     notifyListeners();
-    save();
+    saveNow();
     return true;
   }
 
@@ -1110,12 +1410,21 @@ class CampaignState extends ChangeNotifier {
   int buyFoodFrom(Settlement s, FoodType type, int units) {
     final shopAvail = shopFoodAvail(s, type);
     final want = units.clamp(0, shopAvail);
-    final affordable = (gold ~/ type.costPerUnit).clamp(0, want);
+    // Samouczek: pierwsze 3 sztuki jedzenia gratis
+    var free = 0;
+    if (freeFoodLeft > 0) {
+      free = freeFoodLeft.clamp(0, want);
+    }
+    final paidWant = want - free;
+    final affordable = free + (gold ~/ type.costPerUnit).clamp(0, paidWant);
     if (affordable == 0) return 0;
-    gold -= affordable * type.costPerUnit;
+    freeFoodLeft = (freeFoodLeft - free).clamp(0, 3);
+    gold -= (affordable - free) * type.costPerUnit;
     foodStock[type.index] = foodUnits(type) + affordable;
+    _advanceTutorial(TutorialStep.buyFood);
     _recordPurchase('${s.id}:fd${type.index}', affordable);
     notifyListeners();
+    saveNow();
     return affordable;
   }
 
@@ -1138,7 +1447,7 @@ class CampaignState extends ChangeNotifier {
   void deletePlatoon(CompanyPlatoon p) {
     platoons.remove(p);
     notifyListeners();
-    save();
+    saveNow();
   }
 
   /// Mianuje kapitana plutonu. Zwraca nowego kapitana.
@@ -1148,19 +1457,43 @@ class CampaignState extends ChangeNotifier {
         _captainSeed * 13 + DateTime.now().millisecond);
     p.captain = c;
     notifyListeners();
-    save();
+    saveNow();
     return c;
   }
 
-  /// Przypisuje perk kapitanowi (jeśli ma wolny slot i perk pasuje do typu).
-  bool assignPerk(CompanyPlatoon p, CaptainPerk perk) {
-    final c = p.captain;
-    if (c == null || !c.hasFreeSlot) return false;
-    if (!perk.availableFor(p.type)) return false;
-    if (c.hasPerk(perk)) return false;
-    c.perks.add(perk);
+  /// Pula zdobytych perków kapitanów (czekają na przypisanie w koszarach).
+  /// Lista indeksów CaptainPerk — może być kilka takich samych.
+  final List<int> captainPerkPool = [];
+  /// Perki zdobyte w ostatniej bitwie (do pokazania w dialogu wyniku).
+  List<CaptainPerk> pendingTrainingPerks = [];
+
+  /// Dodaje perk do puli (nagroda za zlecenie szkoleniowe).
+  void addCaptainPerkToPool(CaptainPerk perk) {
+    captainPerkPool.add(perk.index);
     notifyListeners();
-    save();
+    saveNow();
+  }
+
+  /// Ile danego perka jest w puli.
+  int poolCountOf(CaptainPerk perk) =>
+      captainPerkPool.where((i) => i == perk.index).length;
+
+  /// Czy gracz ma dostęp do koszar (posiada osadę z koszarami).
+  bool get hasBarracks => ownedSettlements.any((o) =>
+      o.buildings.any((b) => b.kind == BuildingKind.barracks));
+
+  /// Przypisuje perk z puli kapitanowi. WYMAGA koszar.
+  /// Jeden kapitan = jeden perk, na stałe.
+  bool assignPerkFromPool(CompanyPlatoon p, CaptainPerk perk) {
+    if (!hasBarracks) return false;
+    final c = p.captain;
+    if (c == null || c.hasPerk) return false; // już ma perk
+    if (!perk.availableFor(p.type)) return false;
+    if (poolCountOf(perk) == 0) return false; // brak w puli
+    captainPerkPool.remove(perk.index);
+    c.perk = perk;
+    notifyListeners();
+    saveNow();
     return true;
   }
 
@@ -1172,7 +1505,7 @@ class CampaignState extends ChangeNotifier {
     if (take == 0) return false;
     p.addTroops(tier, take);
     notifyListeners();
-    save();
+    saveNow();
     return true;
   }
 
@@ -1181,7 +1514,7 @@ class CampaignState extends ChangeNotifier {
     final removed = p.removeTroops(tier, n);
     if (removed == 0) return false;
     notifyListeners();
-    save();
+    saveNow();
     return true;
   }
 
@@ -1216,7 +1549,7 @@ class CampaignState extends ChangeNotifier {
     formations.removeWhere((e) => e.name == f.name);
     formations.add(f);
     notifyListeners();
-    save();
+    saveNow();
   }
 
   void deleteFormation(SavedFormation f) {
@@ -1224,15 +1557,49 @@ class CampaignState extends ChangeNotifier {
     if (PresetFormations.all().any((p) => p.name == f.name)) return;
     formations.remove(f);
     notifyListeners();
-    save();
+    saveNow();
   }
 
   // ── Zapis / odczyt ──────────────────────────────────────────────────
 
+  static SharedPreferences? _prefsCache;
+  /// Czy są zmiany niezapisane na dysk (do komunikatu przy wyjściu).
+  bool _dirty = false;
+  bool get hasUnsavedChanges => _dirty;
+
   Future<void> save() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_saveKey, jsonEncode(_toJson()));
+    try {
+      final prefs = _prefsCache ??= await SharedPreferences.getInstance();
+      await prefs.setString(_saveKey, jsonEncode(_toJson()));
+      _dirty = false;
+    } catch (e) {
+      // Zapis nie powiódł się — zostaw _dirty=true, spróbujemy ponownie
+      // (błąd widoczny w konsoli debug, gra nie crashuje)
+      // ignore: avoid_print
+      print('Mercfall save error: $e');
+    }
   }
+
+  /// Zapis "na już". Jeśli prefs w cache — natychmiast, inaczej async.
+  void saveNow() {
+    _dirty = true;
+    final prefs = _prefsCache;
+    if (prefs != null) {
+      try {
+        prefs.setString(_saveKey, jsonEncode(_toJson()));
+        _dirty = false;
+      } catch (e) {
+        // ignore: avoid_print
+        print('Mercfall saveNow error: $e');
+      }
+    } else {
+      save();
+    }
+  }
+
+  /// Konwertuje mapę int→int na String klucze (jsonEncode nie umie int-keys).
+  static Map<String, int> _intMapToJson(Map<int, int> m) =>
+      m.map((k, v) => MapEntry(k.toString(), v));
 
   Map<String, dynamic> _toJson() => {
     'gold': gold, 'day': day,
@@ -1242,10 +1609,10 @@ class CampaignState extends ChangeNotifier {
     'platoons':    platoons.map((p) => p.toJson()).toList(),
     'platoonCounter': _platoonCounter,
     'captainSeed':    _captainSeed,
-    'equipmentStock': equipmentStock,
-    'siegeStock':     siegeStock,
+    'equipmentStock': _intMapToJson(equipmentStock),
+    'siegeStock':     _intMapToJson(siegeStock),
     'ownedSettlements': ownedSettlements.map((o) => o.toJson()).toList(),
-    'resourceStock':  resourceStock,
+    'resourceStock':  _intMapToJson(resourceStock),
     'ruinsLooted':    ruinsLootedOn,
     'contracts':      activeContracts.map((ct) => ct.toJson()).toList(),
     'reputation':     reputation,
@@ -1254,19 +1621,23 @@ class CampaignState extends ChangeNotifier {
     'takenContracts': _taken.toList(),
     'purchased': _purchasedThisCycle,
     'lastCycleDay': _lastCycleDay,
-    'foodStock':      foodStock,
+    'foodStock':      _intMapToJson(foodStock),
     'foodPolicy':     foodPolicy?.index,
     'campaignMorale': campaignMorale,
     'worldMap':       worldMap.toJson(),
     'bandits':        bandits.toJson(),
     'raids':          raids.toJson(),
+    'perks':          perks.toJson(),
+    'tutorialStep':   tutorialStep.index,
+    'freeFoodLeft':   freeFoodLeft,
+    'captainPerkPool': captainPerkPool,
     'allegiance':     allegiance.index,
     'factionRelations': factionRelations.map(
         (k, v) => MapEntry(k.toString(), v.toJson())),
   };
 
   void _loadJson(Map<String, dynamic> j) {
-    gold = j['gold'] as int? ?? 150;
+    gold = j['gold'] as int? ?? 50;
     day  = j['day']  as int? ?? 1;
     battlesWon  = j['battlesWon']  as int? ?? 0;
     battlesLost = j['battlesLost'] as int? ?? 0;
@@ -1349,6 +1720,16 @@ class CampaignState extends ChangeNotifier {
             FactionRelation.fromJson(v as Map<String, dynamic>);
       });
     }
+    final poolData = j['captainPerkPool'];
+    if (poolData is List) captainPerkPool.addAll(poolData.cast<int>());
+    tutorialStep = TutorialStep.values[j['tutorialStep'] as int? ?? 0];
+    freeFoodLeft = j['freeFoodLeft'] as int? ?? 3;
+    final perkData = j['perks'];
+    if (perkData is Map<String, dynamic>) {
+      final loaded = PerkTracker.fromJson(perkData);
+      perks.unlocked.addAll(loaded.unlocked);
+      perks.progress.addAll(loaded.progress);
+    }
     final raidData = j['raids'];
     if (raidData is Map<String, dynamic>) {
       raids = RaidManager.fromJson(raidData);
@@ -1378,10 +1759,9 @@ class CampaignState extends ChangeNotifier {
   }
 
   void _bootstrapArmy() {
+    // Trudny start: garstka piechoty, żadnych łuczników ani jazdy.
     army.stacks.addAll([
-      TroopStack(type: UnitType.infantry, tier: TroopTier.recruit, count: 12),
-      TroopStack(type: UnitType.archers,  tier: TroopTier.recruit, count: 6),
-      TroopStack(type: UnitType.cavalry,  tier: TroopTier.recruit, count: 4),
+      TroopStack(type: UnitType.infantry, tier: TroopTier.recruit, count: 5),
     ]);
   }
 }

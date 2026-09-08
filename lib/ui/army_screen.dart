@@ -24,7 +24,7 @@ class _ArmyScreenState extends State<ArmyScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: MColors.bg,
+      backgroundColor: MColors.bgDeep,
       body: SafeArea(
         child: Column(children: [
           _header(),
@@ -44,37 +44,34 @@ class _ArmyScreenState extends State<ArmyScreen> {
 
   // ── Nagłówek ──────────────────────────────────────────────────────────────
   Widget _header() => Container(
-    padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+    padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
     decoration: const BoxDecoration(
-      border: Border(bottom: BorderSide(color: MColors.gold, width: 1)),
+      color: MColors.topBar,
+      border: Border(bottom: BorderSide(color: MColors.border, width: 1)),
     ),
-    child: Row(children: [
+    child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
       GestureDetector(
         onTap: () => Navigator.pop(context),
-        child: const Icon(Icons.arrow_back, color: MColors.cream, size: 22),
+        child: Text('‹', style: MFonts.display(const TextStyle(
+            color: MColors.parchment, fontSize: 28, height: 1))),
       ),
-      const SizedBox(width: 10),
-      const Expanded(child: Text('🏕 Kompania',
-          style: TextStyle(color: MColors.cream, fontSize: 17,
-              fontWeight: FontWeight.bold))),
-      Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-        Text('🪙 ${c.gold}',
-            style: const TextStyle(color: MColors.gold, fontSize: 15,
-                fontWeight: FontWeight.bold)),
-        Text('Dzień ${c.day} · żołd ${c.totalDailyWage}/dzień',
-            style: const TextStyle(color: MColors.muted, fontSize: 10)),
-      ]),
+      const SizedBox(width: 12),
+      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+        Text('Wolna Kompania', style: MText.title),
+        const SizedBox(height: 2),
+        Text('${c.army.totalActive} LUDZI · ${c.platoons.length} PLUTONÓW · '
+             'ŻOŁD ${c.totalDailyWage}G/DZIEŃ', style: MText.subtitle),
+      ])),
     ]),
   );
 
   Widget _tabBar() => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+    padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
     child: Row(children: [
-      _tabBtn(0, '⚔ Plutony'),
-      const SizedBox(width: 6),
-      _tabBtn(1, '👥 Rezerwa'),
-      const SizedBox(width: 6),
-      _tabBtn(2, '⚒ Ekwipunek'),
+      _tabBtn(0, 'PLUTONY'),
+      _tabBtn(1, 'REZERWA'),
+      _tabBtn(2, 'EKWIPUNEK'),
     ]),
   );
 
@@ -82,19 +79,18 @@ class _ArmyScreenState extends State<ArmyScreen> {
     final active = _tab == idx;
     return Expanded(child: GestureDetector(
       onTap: () => setState(() => _tab = idx),
+      behavior: HitTestBehavior.opaque,
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 9),
+        padding: const EdgeInsets.symmetric(vertical: 10),
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: active ? MColors.gold.withValues(alpha: 0.15) : Colors.transparent,
-          border: Border.all(
-              color: active ? MColors.gold : MColors.borderDim,
-              width: active ? 1.5 : 0.5),
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Text(label, style: TextStyle(
-            color: active ? MColors.gold : MColors.muted,
-            fontSize: 12, fontWeight: active ? FontWeight.bold : null)),
+          border: Border(bottom: BorderSide(
+              color: active ? MColors.ember : Colors.transparent,
+              width: 1.5))),
+        child: Text(label, style: MFonts.label(TextStyle(
+            fontSize: 12,
+            color: active ? MColors.emberBright : MColors.faint,
+            letterSpacing: 1.6))),
       ),
     ));
   }
@@ -122,38 +118,41 @@ class _ArmyScreenState extends State<ArmyScreen> {
       margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
         color: MColors.panelBg,
-        border: Border.all(color: MColors.borderDim),
-        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: MColors.border),
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         // Nagłówek plutonu
         Container(
-          padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
-          decoration: BoxDecoration(
-            color: MColors.unitColor(p.type).withValues(alpha: 0.12),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(7)),
-          ),
-          child: Row(children: [
-            Text(p.type.emoji, style: const TextStyle(fontSize: 20)),
-            const SizedBox(width: 8),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-              Text(p.name, style: const TextStyle(color: MColors.cream,
-                  fontSize: 13, fontWeight: FontWeight.bold)),
-              Text(wounded > 0
-                  ? '$active/${p.count} ludzi (🤕 $wounded) · ${p.dailyWage} zł/dzień'
-                  : '${p.count} ludzi · ${p.dailyWage} zł/dzień',
-                  style: const TextStyle(color: MColors.muted, fontSize: 10)),
+          padding: const EdgeInsets.fromLTRB(12, 11, 10, 10),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+            Transform.rotate(angle: 0.785, child: Container(
+                width: 8, height: 8, color: MColors.unitColor(p.type))),
+            const SizedBox(width: 10),
+            Expanded(child: Row(crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic, children: [
+              Flexible(child: Text(p.name, style: MFonts.label(const TextStyle(
+                  fontSize: 16, color: MColors.bone, letterSpacing: 0.6)),
+                  overflow: TextOverflow.ellipsis)),
+              const SizedBox(width: 8),
+              Text(p.dominantTier.plName.toUpperCase(), style: MFonts.label(
+                  const TextStyle(fontSize: 12, color: MColors.faint,
+                      letterSpacing: 1.2))),
             ])),
+            Text('$active', style: MFonts.label(const TextStyle(
+                fontSize: 17, color: MColors.cream))),
+            if (wounded > 0) Text('/${p.count}', style: MFonts.label(
+                const TextStyle(fontSize: 13, color: MColors.faint))),
+            const SizedBox(width: 8),
             GestureDetector(
               onTap: () => _confirmDelete(p),
               child: const Padding(
-                padding: EdgeInsets.all(4),
-                child: Icon(Icons.delete_outline, color: MColors.muted, size: 18),
+                padding: EdgeInsets.all(2),
+                child: Icon(Icons.close, color: MColors.dim, size: 16),
               ),
             ),
           ]),
         ),
+        Container(height: 1, color: MColors.borderDim),
 
         // Kapitan
         Padding(
@@ -167,7 +166,7 @@ class _ArmyScreenState extends State<ArmyScreen> {
                     decoration: BoxDecoration(
                       border: Border.all(
                           color: MColors.gold.withValues(alpha: 0.5)),
-                      borderRadius: BorderRadius.circular(5),
+                      borderRadius: BorderRadius.circular(0),
                     ),
                     child: const Text('⭐ Mianuj kapitana',
                         style: TextStyle(color: MColors.gold, fontSize: 11)),
@@ -180,28 +179,34 @@ class _ArmyScreenState extends State<ArmyScreen> {
                     Expanded(child: Text(cap.name,
                         style: const TextStyle(color: MColors.gold,
                             fontSize: 12, fontWeight: FontWeight.bold))),
-                    Text('poz. ${cap.level} · ${cap.xp}/${cap.xpToNextLevel} XP',
-                        style: const TextStyle(color: MColors.muted, fontSize: 10)),
                   ]),
                   const SizedBox(height: 6),
-                  Wrap(spacing: 5, runSpacing: 5, children: [
-                    ...cap.perks.map((perk) => _perkChip(perk, active: true)),
-                    if (cap.hasFreeSlot)
-                      GestureDetector(
-                        onTap: () => _showPerkPicker(p),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            border: Border.all(
-                                color: MColors.green.withValues(alpha: 0.6)),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: const Text('+ perk',
-                              style: TextStyle(color: MColors.green, fontSize: 10)),
+                  if (cap.hasPerk)
+                    _perkChip(cap.perk!, active: true)
+                  else if (c.hasBarracks)
+                    GestureDetector(
+                      onTap: () => _showPerkPicker(p),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                              color: MColors.green.withValues(alpha: 0.6)),
                         ),
+                        child: Text(
+                          c.captainPerkPool.isEmpty
+                              ? '+ perk (pula pusta)'
+                              : '+ przypisz perk',
+                          style: TextStyle(
+                              color: c.captainPerkPool.isEmpty
+                                  ? MColors.muted : MColors.green,
+                              fontSize: 10)),
                       ),
-                  ]),
+                    )
+                  else
+                    Text('Perki przypiszesz w Koszarach (własne miasto)',
+                        style: MFonts.body(const TextStyle(
+                            color: MColors.dim, fontSize: 10))),
                 ]),
         ),
 
@@ -221,8 +226,8 @@ class _ArmyScreenState extends State<ArmyScreen> {
     padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
     decoration: BoxDecoration(
       color: active ? MColors.gold.withValues(alpha: 0.15) : Colors.transparent,
-      border: Border.all(color: MColors.gold.withValues(alpha: 0.5)),
-      borderRadius: BorderRadius.circular(4),
+      border: Border.all(color: MColors.borderGold),
+      borderRadius: BorderRadius.circular(0),
     ),
     child: Text('${perk.emoji} ${perk.plName}',
         style: const TextStyle(color: MColors.gold, fontSize: 10)),
@@ -267,7 +272,7 @@ class _ArmyScreenState extends State<ArmyScreen> {
             border: Border.all(
                 color: enabled ? MColors.gold.withValues(alpha: 0.6)
                                : MColors.borderDim),
-            borderRadius: BorderRadius.circular(4),
+            borderRadius: BorderRadius.circular(0),
           ),
           child: Text(label, style: TextStyle(
               color: enabled ? MColors.gold : MColors.muted,
@@ -283,8 +288,8 @@ class _ArmyScreenState extends State<ArmyScreen> {
           padding: const EdgeInsets.symmetric(vertical: 10),
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            border: Border.all(color: MColors.borderDim),
-            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: MColors.border),
+            borderRadius: BorderRadius.circular(0),
           ),
           child: Column(children: [
             Text(type.emoji, style: const TextStyle(fontSize: 16)),
@@ -314,8 +319,8 @@ class _ArmyScreenState extends State<ArmyScreen> {
         padding: const EdgeInsets.all(11),
         decoration: BoxDecoration(
           color: MColors.panelBg,
-          border: Border.all(color: MColors.borderDim),
-          borderRadius: BorderRadius.circular(6)),
+          border: Border.all(color: MColors.border),
+          borderRadius: BorderRadius.circular(0)),
         child: const Row(children: [
           Text('🏰', style: TextStyle(fontSize: 16)),
           SizedBox(width: 8),
@@ -351,8 +356,8 @@ class _ArmyScreenState extends State<ArmyScreen> {
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: MColors.panelBg,
-        border: Border.all(color: MColors.borderDim),
-        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: MColors.border),
+        borderRadius: BorderRadius.circular(0),
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
@@ -386,8 +391,8 @@ class _ArmyScreenState extends State<ArmyScreen> {
           padding: const EdgeInsets.all(11),
           decoration: BoxDecoration(
             color: MColors.panelBg,
-            border: Border.all(color: MColors.borderDim),
-            borderRadius: BorderRadius.circular(6)),
+            border: Border.all(color: MColors.border),
+            borderRadius: BorderRadius.circular(0)),
           child: Equipment.values.every((e) => c.equipmentCount(e) == 0)
               ? const Text('Magazyn pusty — kup ekwipunek u handlarza w osadzie',
                   style: TextStyle(color: MColors.muted, fontSize: 11))
@@ -420,8 +425,8 @@ class _ArmyScreenState extends State<ArmyScreen> {
           Container(
             padding: const EdgeInsets.all(11),
             decoration: BoxDecoration(
-              border: Border.all(color: MColors.borderDim),
-              borderRadius: BorderRadius.circular(6)),
+              border: Border.all(color: MColors.border),
+              borderRadius: BorderRadius.circular(0)),
             child: const Text(
                 'Potrzebujesz ekwipunku w magazynie oraz żołnierzy '
                 'odpowiedniego typu w rezerwie.',
@@ -437,7 +442,7 @@ class _ArmyScreenState extends State<ArmyScreen> {
             decoration: BoxDecoration(
               color: MColors.green.withValues(alpha: 0.06),
               border: Border.all(color: MColors.green.withValues(alpha: 0.4)),
-              borderRadius: BorderRadius.circular(7)),
+              borderRadius: BorderRadius.circular(0)),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
               Text(eq.conversionLabel,
@@ -483,7 +488,7 @@ class _ArmyScreenState extends State<ArmyScreen> {
                            : Colors.transparent,
             border: Border.all(
                 color: enabled ? MColors.green : MColors.borderDim),
-            borderRadius: BorderRadius.circular(5)),
+            borderRadius: BorderRadius.circular(0)),
           child: Text(label, style: TextStyle(
               color: enabled ? MColors.green : MColors.muted,
               fontSize: 12, fontWeight: FontWeight.bold)),
@@ -498,7 +503,7 @@ class _ArmyScreenState extends State<ArmyScreen> {
       decoration: BoxDecoration(
         color: MColors.panelBg,
         border: Border.all(color: MColors.red.withValues(alpha: 0.4)),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(0),
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Text('🤕 RANNI',
@@ -548,8 +553,8 @@ class _ArmyScreenState extends State<ArmyScreen> {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
-            border: Border.all(color: MColors.borderDim),
-            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: MColors.border),
+            borderRadius: BorderRadius.circular(0),
           ),
           child: const Text('🌙 Odpoczynek w osadzie',
               style: TextStyle(color: MColors.muted, fontSize: 10)),
@@ -562,30 +567,37 @@ class _ArmyScreenState extends State<ArmyScreen> {
   void _showPerkPicker(CompanyPlatoon p) {
     final cap = p.captain;
     if (cap == null) return;
+    // Tylko perki które SĄ w puli i pasują do typu plutonu
     final available = CaptainPerkInfo.forType(p.type)
-        .where((perk) => !cap.hasPerk(perk))
+        .where((perk) => c.poolCountOf(perk) > 0)
         .toList();
 
     showModalBottomSheet(
       context: context,
       backgroundColor: MColors.panelBg,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(0)),
       ),
       builder: (ctx) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('Perk dla: ${cap.name}',
-                style: const TextStyle(color: MColors.cream,
-                    fontSize: 15, fontWeight: FontWeight.bold)),
-            Text('Slot ${cap.perks.length + 1} z ${cap.perkSlots}',
-                style: const TextStyle(color: MColors.muted, fontSize: 11)),
+            Text('Przypisz perk: ${cap.name}',
+                style: MFonts.label(const TextStyle(color: MColors.cream,
+                    fontSize: 15, letterSpacing: 1))),
+            Text('Perk na stałe — zniknie z plutonem',
+                style: MFonts.body(const TextStyle(
+                    color: MColors.faint, fontSize: 11))),
             const SizedBox(height: 12),
+            if (available.isEmpty)
+              Text('Brak perków w puli pasujących do tego plutonu. '
+                   'Zdobądź je za zlecenia szkoleniowe.',
+                  style: MFonts.body(const TextStyle(
+                      color: MColors.muted, fontSize: 12))),
             ...available.map((perk) => GestureDetector(
               onTap: () {
-                c.assignPerk(p, perk);
+                c.assignPerkFromPool(p, perk);
                 Navigator.pop(ctx);
                 _refresh();
               },
@@ -593,8 +605,7 @@ class _ArmyScreenState extends State<ArmyScreen> {
                 margin: const EdgeInsets.only(bottom: 8),
                 padding: const EdgeInsets.all(11),
                 decoration: BoxDecoration(
-                  border: Border.all(color: MColors.borderDim),
-                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: MColors.border),
                 ),
                 child: Row(children: [
                   Text(perk.emoji, style: const TextStyle(fontSize: 20)),
@@ -607,9 +618,9 @@ class _ArmyScreenState extends State<ArmyScreen> {
                     Text(perk.plDesc, style: const TextStyle(
                         color: MColors.muted, fontSize: 11)),
                   ])),
-                  if (perk.requiredType != null)
-                    Text(perk.requiredType!.emoji,
-                        style: const TextStyle(fontSize: 14)),
+                  Text('×${c.poolCountOf(perk)}', style: const TextStyle(
+                      color: MColors.gold, fontSize: 13,
+                      fontWeight: FontWeight.bold)),
                 ]),
               ),
             )),

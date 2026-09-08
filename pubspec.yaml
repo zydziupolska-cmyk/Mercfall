@@ -10,6 +10,8 @@ dependencies:
   flutter:
     sdk: flutter
   shared_preferences: ^2.3.0
+  google_fonts: ^6.2.1
+  audioplayers: ^6.1.0
   flutter_localizations:
     sdk: flutter
 
@@ -18,3 +20,9 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/audio/menu.mp3
+    - assets/audio/map.mp3
+    - assets/audio/battle.mp3
+    - assets/audio/village.mp3
+    - assets/audio/siege.mp3

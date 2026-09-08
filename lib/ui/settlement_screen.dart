@@ -56,7 +56,7 @@ class _SettlementScreenState extends State<SettlementScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: MColors.bg,
+      backgroundColor: MColors.bgDeep,
       body: SafeArea(child: Column(children: [
         _header(),
         _tabBar(),
@@ -67,37 +67,31 @@ class _SettlementScreenState extends State<SettlementScreen> {
   }
 
   Widget _header() => Container(
-    padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+    padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
     decoration: const BoxDecoration(
-      border: Border(bottom: BorderSide(color: MColors.gold, width: 1))),
-    child: Row(children: [
+      color: MColors.topBar,
+      border: Border(bottom: BorderSide(color: MColors.border, width: 1))),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
       GestureDetector(
         onTap: () => Navigator.pop(context),
-        child: const Icon(Icons.arrow_back, color: MColors.cream, size: 22)),
-      const SizedBox(width: 10),
+        child: Text('‹', style: MFonts.display(const TextStyle(
+            color: MColors.parchment, fontSize: 28, height: 1)))),
+      const SizedBox(width: 12),
       Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-        Text('${o.type.emoji} ${o.name}',
-            style: const TextStyle(color: MColors.cream, fontSize: 16,
-                fontWeight: FontWeight.bold)),
-        Text('Twoja osada · ${o.buildings.length}/${o.maxBuildings} budynków',
-            style: const TextStyle(color: MColors.muted, fontSize: 10)),
+        Text(o.name, style: MText.title),
+        const SizedBox(height: 2),
+        Text('TWOJA OSADA · ${o.buildings.length}/${o.maxBuildings} BUDYNKÓW · '
+             '${o.population}/${o.populationCap} LUDZI', style: MText.subtitle),
       ])),
-      Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-        Text('🪙 ${c.gold}', style: const TextStyle(color: MColors.gold,
-            fontSize: 15, fontWeight: FontWeight.bold)),
-        Text('👥 ${o.population}/${o.populationCap} ludzi',
-            style: const TextStyle(color: MColors.muted, fontSize: 10)),
-      ]),
     ]),
   );
 
-  Widget _tabBar() => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+  Widget _tabBar() => Container(
+    padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
     child: Row(children: [
-      _tabBtn(0, '🏗 Budynki'),
-      const SizedBox(width: 8),
-      _tabBtn(1, '📦 Magazyn'),
+      _tabBtn(0, 'BUDYNKI'),
+      _tabBtn(1, 'MAGAZYN'),
     ]),
   );
 
@@ -105,18 +99,18 @@ class _SettlementScreenState extends State<SettlementScreen> {
     final active = _tab == idx;
     return Expanded(child: GestureDetector(
       onTap: () => setState(() => _tab = idx),
+      behavior: HitTestBehavior.opaque,
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 9),
+        padding: const EdgeInsets.symmetric(vertical: 10),
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: active ? MColors.gold.withValues(alpha: 0.15) : Colors.transparent,
-          border: Border.all(
-              color: active ? MColors.gold : MColors.borderDim,
-              width: active ? 1.5 : 0.5),
-          borderRadius: BorderRadius.circular(6)),
-        child: Text(label, style: TextStyle(
-            color: active ? MColors.gold : MColors.muted,
-            fontSize: 12, fontWeight: active ? FontWeight.bold : null)),
+          border: Border(bottom: BorderSide(
+              color: active ? MColors.ember : Colors.transparent,
+              width: 1.5))),
+        child: Text(label, style: MFonts.label(TextStyle(
+            fontSize: 12,
+            color: active ? MColors.emberBright : MColors.faint,
+            letterSpacing: 1.6))),
       ),
     ));
   }
@@ -140,8 +134,8 @@ class _SettlementScreenState extends State<SettlementScreen> {
           padding: const EdgeInsets.all(11),
           decoration: BoxDecoration(
             color: MColors.gold.withValues(alpha: 0.08),
-            border: Border.all(color: MColors.gold.withValues(alpha: 0.5)),
-            borderRadius: BorderRadius.circular(7)),
+            border: Border.all(color: MColors.borderGold),
+            borderRadius: BorderRadius.circular(0)),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start,
               children: [
             const Text('🏚 Osada opuszczona',
@@ -165,8 +159,8 @@ class _SettlementScreenState extends State<SettlementScreen> {
           padding: const EdgeInsets.all(11),
           decoration: BoxDecoration(
             color: MColors.panelBg,
-            border: Border.all(color: MColors.borderDim),
-            borderRadius: BorderRadius.circular(7)),
+            border: Border.all(color: MColors.border),
+            borderRadius: BorderRadius.circular(0)),
           child: Column(children: [
             Row(children: [
               const Text('👥', style: TextStyle(fontSize: 20)),
@@ -346,7 +340,7 @@ class _SettlementScreenState extends State<SettlementScreen> {
         color: MColors.panelBg,
         border: Border.all(color: b.workers > 0
             ? MColors.green.withValues(alpha: 0.5) : MColors.borderDim),
-        borderRadius: BorderRadius.circular(7)),
+        borderRadius: BorderRadius.circular(0)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Text(k.emoji, style: const TextStyle(fontSize: 20)),
@@ -422,7 +416,7 @@ class _SettlementScreenState extends State<SettlementScreen> {
       decoration: BoxDecoration(
         color: MColors.red.withValues(alpha: 0.10),
         border: Border.all(color: MColors.red, width: 1.5),
-        borderRadius: BorderRadius.circular(7)),
+        borderRadius: BorderRadius.circular(0)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Text(raid.type.emoji, style: const TextStyle(fontSize: 20)),
@@ -479,7 +473,7 @@ class _SettlementScreenState extends State<SettlementScreen> {
       padding: const EdgeInsets.all(9),
       decoration: BoxDecoration(
         color: MColors.bg.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(5)),
+        borderRadius: BorderRadius.circular(0)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Text('ADMINISTRACJA', style: TextStyle(
             color: MColors.muted, fontSize: 9, letterSpacing: 1)),
@@ -499,8 +493,8 @@ class _SettlementScreenState extends State<SettlementScreen> {
         Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
-            border: Border.all(color: MColors.borderDim),
-            borderRadius: BorderRadius.circular(4)),
+            border: Border.all(color: MColors.border),
+            borderRadius: BorderRadius.circular(0)),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start,
               children: [
             const Text('Twoje terytorium', style: TextStyle(
@@ -537,7 +531,7 @@ class _SettlementScreenState extends State<SettlementScreen> {
       padding: const EdgeInsets.all(9),
       decoration: BoxDecoration(
         color: MColors.bg.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(5)),
+        borderRadius: BorderRadius.circular(0)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           const Text('WYTWARZANIE', style: TextStyle(
@@ -560,7 +554,7 @@ class _SettlementScreenState extends State<SettlementScreen> {
                   : MColors.panelBg,
               border: Border.all(color: o2.isDone
                   ? MColors.green : MColors.borderDim),
-              borderRadius: BorderRadius.circular(4)),
+              borderRadius: BorderRadius.circular(0)),
             child: Row(children: [
               Text(o2.item.emoji, style: const TextStyle(fontSize: 15)),
               const SizedBox(width: 7),
@@ -605,8 +599,8 @@ class _SettlementScreenState extends State<SettlementScreen> {
               padding: const EdgeInsets.symmetric(vertical: 7),
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                border: Border.all(color: MColors.gold.withValues(alpha: 0.5)),
-                borderRadius: BorderRadius.circular(4)),
+                border: Border.all(color: MColors.borderGold),
+                borderRadius: BorderRadius.circular(0)),
               child: const Text('+ Nowe zlecenie', style: TextStyle(
                   color: MColors.gold, fontSize: 11)),
             ),
@@ -656,7 +650,7 @@ class _SettlementScreenState extends State<SettlementScreen> {
                   border: Border.all(color: canMake
                       ? MColors.green.withValues(alpha: 0.4)
                       : MColors.borderDim),
-                  borderRadius: BorderRadius.circular(6)),
+                  borderRadius: BorderRadius.circular(0)),
                 child: Row(children: [
                   Text(item.emoji, style: const TextStyle(fontSize: 22)),
                   const SizedBox(width: 10),
@@ -699,8 +693,8 @@ class _SettlementScreenState extends State<SettlementScreen> {
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(11),
       decoration: BoxDecoration(
-        border: Border.all(color: MColors.borderDim),
-        borderRadius: BorderRadius.circular(7)),
+        border: Border.all(color: MColors.border),
+        borderRadius: BorderRadius.circular(0)),
       child: Row(children: [
         Text(k.emoji, style: const TextStyle(fontSize: 20)),
         const SizedBox(width: 9),
@@ -750,8 +744,8 @@ class _SettlementScreenState extends State<SettlementScreen> {
             padding: const EdgeInsets.all(11),
             decoration: BoxDecoration(
               color: MColors.panelBg,
-              border: Border.all(color: MColors.borderDim),
-              borderRadius: BorderRadius.circular(7)),
+              border: Border.all(color: MColors.border),
+              borderRadius: BorderRadius.circular(0)),
             child: Row(children: [
               Text(r.emoji, style: const TextStyle(fontSize: 22)),
               const SizedBox(width: 10),
@@ -798,7 +792,7 @@ class _SettlementScreenState extends State<SettlementScreen> {
                            : Colors.transparent,
             border: Border.all(
                 color: enabled ? MColors.green : MColors.borderDim),
-            borderRadius: BorderRadius.circular(5)),
+            borderRadius: BorderRadius.circular(0)),
           child: Text(label, style: TextStyle(
               color: enabled ? MColors.green : MColors.muted,
               fontSize: 11, fontWeight: FontWeight.bold)),
@@ -815,7 +809,7 @@ class _SettlementScreenState extends State<SettlementScreen> {
             border: Border.all(
                 color: enabled ? MColors.gold.withValues(alpha: 0.6)
                                : MColors.borderDim),
-            borderRadius: BorderRadius.circular(4)),
+            borderRadius: BorderRadius.circular(0)),
           child: Text(label, style: TextStyle(
               color: enabled ? MColors.gold : MColors.muted,
               fontSize: 16, fontWeight: FontWeight.bold)),
@@ -880,7 +874,7 @@ class _SettlementScreenState extends State<SettlementScreen> {
             decoration: BoxDecoration(
               color: MColors.gold.withValues(alpha: 0.12),
               border: Border.all(color: MColors.gold),
-              borderRadius: BorderRadius.circular(6)),
+              borderRadius: BorderRadius.circular(0)),
             child: const Text('📦 Zbierz', style: TextStyle(
                 color: MColors.gold, fontSize: 13, fontWeight: FontWeight.bold)),
           ),

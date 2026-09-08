@@ -47,7 +47,7 @@ extension FactionInfo on Faction {
     Faction.none        => 0xFF8A8278,
     Faction.ironCrown   => 0xFF6A7A9A, // stalowy błękit
     Faction.greenBanner => 0xFF5A8A45, // zieleń
-    Faction.ashenPact   => 0xFF9A5A3A, // rdzawy
+    Faction.ashenPact   => 0xFFA83A2A, // czerwień (rdzawy pakt)
     Faction.saltLeague  => 0xFFB0A050, // złoto-piaskowy
   };
 

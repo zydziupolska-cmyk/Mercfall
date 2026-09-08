@@ -144,6 +144,10 @@ class Platoon {
   final SiegeEngine? engine;
   /// Czy machina dotarła do muru i pracuje.
   bool engineWorking = false;
+  /// Postęp niszczenia celowanego fragmentu 0..1 (własny per machina).
+  double engineBreachProgress = 0;
+  /// Czy machina zrobiła już swoje przejście (drabina / brama / wyrwa gotowe).
+  bool engineDone = false;
   /// Czy obrońca stoi na murze (strzela ponad murem).
   final bool onWall;
 
@@ -209,10 +213,13 @@ class BattleResult {
   final bool playerWon;
   final int turnCount;
   final List<PlatoonResult> platoonResults;
+  /// Scenariusz bitwy (index BattleScenario) — do warunków szkoleniowych.
+  final int scenarioIndex;
   const BattleResult({
     required this.playerWon,
     required this.turnCount,
     required this.platoonResults,
+    this.scenarioIndex = 0,
   });
 }
 
@@ -252,8 +259,26 @@ class BattleSimulation {
   final Map<SiegeEngine, int> siegeEngines;
   /// Postęp przełamywania muru 0..1 (dla citySiege).
   double breachProgress = 0;
-  bool get wallBreached => layout == null ||
-      layout!.walls.isEmpty || breachProgress >= 1.0;
+  /// Mur "przełamany" gdy każdy segment ma przynajmniej jedno przejście.
+  /// (Wpływa na to, czy łucznicy wciąż strzelają ponad murem.)
+  bool get wallBreached {
+    if (layout == null || layout!.walls.isEmpty) return true;
+    for (final w in layout!.walls) {
+      if (w.isBreached) continue;
+      if (w.breaches.isEmpty && w.ladderPoints.isEmpty) return false;
+    }
+    return true;
+  }
+
+  /// Czy istnieje choć jedno przejście przez mur (do decyzji AI o szturmie).
+  bool get anyBreachOpen {
+    if (layout == null) return true;
+    for (final w in layout!.walls) {
+      if (w.isBreached || w.breaches.isNotEmpty ||
+          w.ladderPoints.isNotEmpty) return true;
+    }
+    return false;
+  }
 
   /// Strzały wystrzelone w bieżącym kroku — odczytuje UI, by rysować animację.
   /// Czyszczone na starcie każdego step().
@@ -351,17 +376,18 @@ class BattleSimulation {
           }
         }
       }
-      // Mur — twarda bariera dopóki nie przełamany
-      if (!wallBreached) {
-        for (final w in layout!.walls) {
-          if (w.isBreached) continue;
-          final wallY = w.y1;
-          // Gracz atakuje z dołu — nie przepuszczaj powyżej muru
-          if (p.isPlayer && p.y < wallY + p.radius + 4 &&
-              p.x >= w.x1 && p.x <= w.x2) {
-            p.y = wallY + p.radius + 4;
-            p.vy = p.vy.clamp(0.0, 9999.0);
-          }
+      // Mur — twarda bariera, ale z lokalnymi przejściami (wyrwy/drabiny/brama)
+      for (final w in layout!.walls) {
+        if (w.isBreached) continue;
+        final wallY = w.y1;
+        // Machiny same przechodzą swobodnie (pracują pod murem)
+        if (p.engine != null) continue;
+        // Gracz atakuje z dołu — blokuj powyżej muru, chyba że jest przejście
+        if (p.isPlayer && p.y < wallY + p.radius + 4 &&
+            p.x >= w.x1 && p.x <= w.x2) {
+          if (w.hasOpeningAt(p.x)) continue; // wolna droga przez wyrwę/drabinę
+          p.y = wallY + p.radius + 4;
+          p.vy = p.vy.clamp(0.0, 9999.0);
         }
       }
     }
@@ -544,41 +570,114 @@ class BattleSimulation {
   void _updateSiegeEngine(Platoon p, double dt) {
     final eng = p.engine!;
     if (layout == null || layout!.walls.isEmpty) return;
+    if (p.engineDone) { p.engineWorking = false; return; }
 
     final wallY = layout!.walls.first.y1;
     final distToWall = (p.y - wallY).abs();
 
+    // Który segment ta machina atakuje?
+    final target = _targetSegment(eng, p);
+    if (target == null) { p.engineDone = true; p.engineWorking = false; return; }
+
+    // Punkt na murze w który celuje ta machina
+    final aimX = switch (eng) {
+      // Taran zawsze w bramę
+      SiegeEngine.ram => (target.x1 + target.x2) / 2,
+      // Drabiny i katapulta — w miejsce naprzeciw swojej pozycji
+      _ => p.x.clamp(target.x1 + 20, target.x2 - 20),
+    };
+
     if (eng == SiegeEngine.catapult) {
-      // Stoi w miejscu, strzela gdy mur w zasięgu (250px)
-      p.engineWorking = distToWall <= 250 && !wallBreached;
+      // Stoi w miejscu, bije z dystansu gdy segment w zasięgu (250px)
+      p.engineWorking = distToWall <= 250;
     } else {
-      // Drabiny/taran jadą do muru
-      if (distToWall > p.radius + 16 && !wallBreached) {
+      // Drabiny/taran podjeżdżają pod mur
+      if (distToWall > p.radius + 14) {
         final dir = p.y > wallY ? -1.0 : 1.0;
         p.y += dir * eng.speed * dt;
         p.engineWorking = false;
       } else {
-        p.engineWorking = !wallBreached;
+        p.engineWorking = true;
       }
-      // Taran celuje w bramę — dosuń w poziomie
+      // Taran dosuwa się w poziomie do bramy
       if (eng == SiegeEngine.ram) {
-        final gate = layout!.walls.firstWhere((w) => w.hasGate,
-            orElse: () => layout!.walls.first);
-        final gateX = (gate.x1 + gate.x2) / 2;
-        final dx = gateX - p.x;
+        final dx = aimX - p.x;
         if (dx.abs() > 6) p.x += dx.sign * eng.speed * 0.8 * dt;
       }
     }
 
-    // Postęp wyłomu tylko gdy machina pracuje
+    // Postęp niszczenia CELOWANEGO segmentu (własny licznik machiny)
     if (p.engineWorking) {
-      breachProgress = (breachProgress + dt / eng.breachTime).clamp(0.0, 1.0);
-      if (breachProgress >= 1.0) {
-        for (final w in layout!.walls) { w.integrity = 0; }
+      p.engineBreachProgress =
+          (p.engineBreachProgress + dt / eng.breachTime).clamp(0.0, 1.0);
+
+      // Odzwierciedl uszkodzenie w integrity segmentu (do rysowania rys)
+      if (eng != SiegeEngine.ladders) {
+        target.integrity =
+            (1.0 - p.engineBreachProgress).clamp(0.0, 1.0);
+      }
+
+      if (p.engineBreachProgress >= 1.0) {
+        _applyBreach(eng, target, aimX);
+        p.engineDone = true;
+        p.engineWorking = false;
       }
     }
 
     _clampOne(p);
+    // Globalny breachProgress = najlepszy postęp dowolnej machiny (pasek HUD)
+    _syncBreachProgress();
+  }
+
+  /// Wybiera segment muru dla danej machiny.
+  WallSegment? _targetSegment(SiegeEngine eng, Platoon p) {
+    final walls = layout!.walls;
+    if (eng == SiegeEngine.ram) {
+      // Taran celuje w bramę
+      for (final w in walls) {
+        if (w.hasGate && !w.isBreached) return w;
+      }
+      // Brak bramy → najbliższy nieuszkodzony
+    }
+    // Drabiny/katapulta: segment naprzeciw pozycji machiny
+    WallSegment? best;
+    var bestDx = double.infinity;
+    for (final w in walls) {
+      if (w.isBreached) continue;
+      final cx = (w.x1 + w.x2) / 2;
+      final dx = (cx - p.x).abs();
+      // Preferuj segment w którego zakresie x leży machina
+      final inRange = p.x >= w.x1 && p.x <= w.x2;
+      final score = inRange ? -1000 + dx : dx;
+      if (score < bestDx) { bestDx = score; best = w; }
+    }
+    return best;
+  }
+
+  /// Realizuje przejście gdy machina skończy pracę.
+  void _applyBreach(SiegeEngine eng, WallSegment seg, double aimX) {
+    switch (eng) {
+      case SiegeEngine.ladders:
+        // Drabina NIE niszczy muru — stawia punkt wspinaczki (wąskie przejście)
+        seg.ladderPoints.add(aimX);
+      case SiegeEngine.ram:
+        // Taran wybija BRAMĘ — przejście szer. 80px w miejscu bramy
+        seg.addBreach(aimX, eng.breachWidth);
+      case SiegeEngine.catapult:
+        // Katapulta robi SZEROKĄ wyrwę 160px w tym segmencie
+        seg.addBreach(aimX, eng.breachWidth);
+    }
+  }
+
+  /// Globalny pasek postępu = maksimum z aktywnych machin (informacyjnie w HUD).
+  void _syncBreachProgress() {
+    var best = 0.0;
+    for (final p in platoons) {
+      if (p.engine == null) continue;
+      final prog = p.engineDone ? 1.0 : p.engineBreachProgress;
+      if (prog > best) best = prog;
+    }
+    breachProgress = best;
   }
 
   void _clampOne(Platoon p) {
@@ -710,6 +809,7 @@ class BattleSimulation {
   BattleResult buildResult() => BattleResult(
     playerWon: playerWon,
     turnCount: tickCount,
+    scenarioIndex: scenario.index,
     platoonResults: platoons.map((p) => PlatoonResult(
       platoonId:  p.id,
       type:       p.type,

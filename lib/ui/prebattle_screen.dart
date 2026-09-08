@@ -15,11 +15,14 @@ class PreBattleScreen extends StatefulWidget {
   final CampaignState campaign;
   final LocaleNotifier localeNotifier;
   final BattleScenario scenario;
+  /// Siła przeciwnika (liczba ludzi bandy). 0 = auto wg siły gracza.
+  final int enemyStrength;
   const PreBattleScreen({
     super.key,
     required this.campaign,
     required this.localeNotifier,
     this.scenario = BattleScenario.openField,
+    this.enemyStrength = 0,
   });
 
   @override
@@ -148,7 +151,8 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
         isPlayer: true, count: p.count,
         x: p.relX * fieldW, y: p.relY * fieldH,
         order: PlatoonOrder.hold, // CZEKAJĄ na rozkaz gracza
-        dmgMult:        src?.dmgMultiplier         ?? 1.0,
+        dmgMult: (src?.dmgMultiplier ?? 1.0) *
+            widget.campaign.perks.damageMult, // Żelazna dyscyplina
         dmgTakenMult:   src?.damageTakenMultiplier ?? 1.0,
         moraleLossMult: src?.moraleLossMultiplier  ?? 1.0,
         speedMult:      src?.speedMultiplier       ?? 1.0,
@@ -206,18 +210,43 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
           x: fieldW*0.3, y: fieldH*0.06));
       }
     } else {
-      // Otwarte pole / ruiny — standardowy przeciwnik
-      enemy.addAll([
-        Platoon(id:'e0', type:UnitType.infantry, tier:TroopTier.soldier,
-          isPlayer:false, count:(totalPlayer*0.4*defMul).round().clamp(2,60),
-          x: fieldW*0.5, y: fieldH*0.1),
-        Platoon(id:'e1', type:UnitType.archers, tier:TroopTier.recruit,
-          isPlayer:false, count:(totalPlayer*0.25*defMul).round().clamp(2,40),
-          x: fieldW*0.25, y: fieldH*0.12),
-        Platoon(id:'e2', type:UnitType.cavalry, tier:TroopTier.soldier,
-          isPlayer:false, count:(totalPlayer*0.2*defMul).round().clamp(1,30),
-          x: fieldW*0.75, y: fieldH*0.15),
-      ]);
+      // Otwarte pole / ruiny — skład wg SIŁY BANDY (nie gracza).
+      // Słabe bandy = sama piechota. Silniejsze dodają łuczników, potem jazdę.
+      final total = widget.enemyStrength > 0
+          ? widget.enemyStrength
+          : (totalPlayer * 0.6).round().clamp(3, 60);
+
+      if (total <= 8) {
+        // Mała banda — tylko piechota (rekruci)
+        enemy.add(Platoon(id:'e0', type:UnitType.infantry,
+          tier:TroopTier.recruit, isPlayer:false,
+          count: total.clamp(1, 60),
+          x: fieldW*0.5, y: fieldH*0.10));
+      } else if (total <= 16) {
+        // Średnia — piechota + trochę łuczników
+        enemy.add(Platoon(id:'e0', type:UnitType.infantry,
+          tier:TroopTier.recruit, isPlayer:false,
+          count:(total*0.7).round().clamp(2,60),
+          x: fieldW*0.5, y: fieldH*0.10));
+        enemy.add(Platoon(id:'e1', type:UnitType.archers,
+          tier:TroopTier.recruit, isPlayer:false,
+          count:(total*0.3).round().clamp(1,40),
+          x: fieldW*0.28, y: fieldH*0.12));
+      } else {
+        // Duża banda — pełen skład z jazdą
+        enemy.add(Platoon(id:'e0', type:UnitType.infantry,
+          tier:TroopTier.soldier, isPlayer:false,
+          count:(total*0.5).round().clamp(2,60),
+          x: fieldW*0.5, y: fieldH*0.10));
+        enemy.add(Platoon(id:'e1', type:UnitType.archers,
+          tier:TroopTier.recruit, isPlayer:false,
+          count:(total*0.3).round().clamp(1,40),
+          x: fieldW*0.25, y: fieldH*0.12));
+        enemy.add(Platoon(id:'e2', type:UnitType.cavalry,
+          tier:TroopTier.soldier, isPlayer:false,
+          count:(total*0.2).round().clamp(1,30),
+          x: fieldW*0.75, y: fieldH*0.14));
+      }
     }
 
     // ── Machiny oblężnicze gracza jako osobne "plutony" ───────────────────
@@ -232,7 +261,8 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
             type: UnitType.infantry,
             tier: TroopTier.soldier,
             isPlayer: true,
-            count: eng.durability,
+            count: (eng.durability *
+                widget.campaign.perks.engineHpMult).round(), // Mistrzowie oblężeń
             x: fieldW * (0.20 + 0.28 * idx).clamp(0.08, 0.92),
             y: fieldH * (eng == SiegeEngine.catapult ? 0.90 : 0.82),
             order: PlatoonOrder.advance,
@@ -263,9 +293,9 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: MColors.bg,
+      backgroundColor: MColors.bgDeep,
       appBar: AppBar(
-        backgroundColor: MColors.bg,
+        backgroundColor: MColors.bgDeep,
         foregroundColor: MColors.cream,
         elevation: 0,
         iconTheme: const IconThemeData(color: MColors.gold),
@@ -285,7 +315,7 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                 decoration: BoxDecoration(
                   border: Border.all(color: MColors.gold.withValues(alpha: 0.6)),
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: BorderRadius.circular(0),
                 ),
                 child: const Text('🏕 Kompania',
                     style: TextStyle(color: MColors.gold, fontSize: 12)),
@@ -331,7 +361,7 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
                     color: isActive ? MColors.gold : MColors.borderDim,
                     width: isActive ? 1.5 : 0.5,
                   ),
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(0),
                 ),
                 alignment: Alignment.center,
                 child: Text('🏕 Moje',
@@ -353,7 +383,7 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 decoration: BoxDecoration(
                   border: Border.all(color: MColors.gold.withValues(alpha: 0.5), width: 0.5),
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(0),
                 ),
                 alignment: Alignment.center,
                 child: const Text('+ Zapisz', style: TextStyle(color: MColors.gold, fontSize: 12)),
@@ -375,7 +405,7 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
                   color: isActive ? MColors.gold : MColors.borderDim,
                   width: isActive ? 1.5 : 0.5,
                 ),
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.circular(0),
               ),
               alignment: Alignment.center,
               child: Text(f.name,
@@ -459,7 +489,7 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
       decoration: BoxDecoration(
         color: MColors.panelBg,
         border: Border.all(color: MColors.borderDim),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(0),
       ),
       child: Row(children: [
         Text(p.type.emoji, style: const TextStyle(fontSize: 22)),
@@ -474,11 +504,11 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
               child: Row(children: [
                 Text('⭐ ${p.source!.captain!.name}',
                     style: const TextStyle(color: MColors.gold, fontSize: 10)),
-                const SizedBox(width: 6),
-                ...p.source!.captain!.perks.map((perk) => Padding(
-                  padding: const EdgeInsets.only(right: 4),
-                  child: Text(perk.emoji, style: const TextStyle(fontSize: 11)),
-                )),
+                if (p.source!.captain!.perk != null) ...[
+                  const SizedBox(width: 6),
+                  Text(p.source!.captain!.perk!.emoji,
+                      style: const TextStyle(fontSize: 11)),
+                ],
               ]),
             ),
         ])),
@@ -497,7 +527,7 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         border: Border.all(color: color.withValues(alpha: 0.5)),
-        borderRadius: BorderRadius.circular(4),
+        borderRadius: BorderRadius.circular(0),
       ),
       child: Text(label, style: TextStyle(color: color, fontSize: 11)),
     ),
@@ -542,7 +572,7 @@ class _PreBattleScreenState extends State<PreBattleScreen> {
             decoration: BoxDecoration(
               color: platoons.isNotEmpty ? MColors.red.withValues(alpha: 0.2) : Colors.transparent,
               border: Border.all(color: platoons.isNotEmpty ? MColors.red : MColors.borderDim, width: 1.5),
-              borderRadius: BorderRadius.circular(6),
+              borderRadius: BorderRadius.circular(0),
             ),
             child: Text('⚔ BITWA',
                 style: TextStyle(

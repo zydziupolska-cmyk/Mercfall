@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import '../engine/army.dart';
 import '../engine/battle_sim.dart';
 import '../engine/campaign_state.dart';
+import '../engine/company.dart';
 import '../engine/siege.dart';
 import '../l10n/locale_notifier.dart';
+import '../engine/audio.dart';
 import 'game_theme.dart';
 
 // ── Mgła wojny + Line-of-Sight ────────────────────────────────────────────────
@@ -109,8 +111,15 @@ class _BattleScreenState extends State<BattleScreen>
   BattleSimulation get sim => widget.simulation;
 
   @override
+  @override
   void initState() {
     super.initState();
+    // Muzyka wg scenariusza bitwy
+    MusicManager.instance.play(switch (sim.scenario) {
+      BattleScenario.citySiege   => MusicTrack.siege,
+      BattleScenario.villageRaid => MusicTrack.village,
+      _ => MusicTrack.battle, // pole otwarte i ruiny
+    });
     _ticker =
         AnimationController(vsync: this, duration: const Duration(hours: 1))
           ..addListener(_onTick)
@@ -155,7 +164,13 @@ class _BattleScreenState extends State<BattleScreen>
         builder: (_) => _ResultDialog(
           result: result,
           campaign: widget.campaign,
-          onClose: () { Navigator.pop(context); Navigator.pop(context); },
+          onClose: () {
+            widget.campaign.pendingTrainingPerks = [];
+            // Zamknij dialog, potem WSZYSTKIE ekrany bitwy (battle + prebattle),
+            // wracając aż na mapę świata.
+            Navigator.of(context).pop(); // dialog
+            Navigator.of(context).popUntil((route) => route.settings.name == '/map');
+          },
         ),
       );
     });
@@ -226,24 +241,7 @@ class _BattleScreenState extends State<BattleScreen>
   }
 
   // ── Szacunkowa liczba wrogów (prawdziwy LoS) ───────────────────────────────
-  String _headerEnemyCount() {
-    final friendlies = sim.playerPlatoons.where((p) => p.isAlive).toList();
-    int total = 0;
-    bool anyExact = false;
-    for (final e in sim.enemyPlatoons.where((p) => p.isAlive)) {
-      final revealed = friendlies.any(
-          (f) => _checkLoS(f.x, f.y, e.x, e.y, sim.obstacles));
-      if (revealed) {
-        total += e.count;
-        anyExact = true;
-      } else {
-        final c = e.count;
-        total += c <= 8 ? 5 : c <= 15 ? 10 : c <= 25 ? 20
-               : c <= 40 ? 35 : c <= 60 ? 50 : c <= 90 ? 75 : 100;
-      }
-    }
-    return anyExact ? '$total' : '~$total';
-  }
+
 
   // ── Build ─────────────────────────────────────────────────────────────────
   @override
@@ -254,7 +252,7 @@ class _BattleScreenState extends State<BattleScreen>
         if (!didPop) _confirmRetreat();
       },
       child: Scaffold(
-      backgroundColor: MColors.bg,
+      backgroundColor: MColors.bgDeep,
       body: SafeArea(
         child: Stack(children: [
           // ── Pole bitwy — pełny ekran ──────────────────────────────────────
@@ -296,7 +294,10 @@ class _BattleScreenState extends State<BattleScreen>
 
   /// Odwrót z bitwy — wróg zagarnia łupy i bierze jeńców.
   void _confirmRetreat() {
-    if (sim.isOver) { Navigator.pop(context); return; }
+    if (sim.isOver) {
+      Navigator.of(context).popUntil((route) => route.settings.name == '/map');
+      return;
+    }
     _paused = true;
 
     final alive = sim.playerPlatoons
@@ -312,7 +313,7 @@ class _BattleScreenState extends State<BattleScreen>
       builder: (ctx) => AlertDialog(
         backgroundColor: MColors.panelBg,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(0),
           side: const BorderSide(color: MColors.red, width: 2)),
         title: const Text('↩ Odwrót z pola bitwy',
             style: TextStyle(color: MColors.red, fontSize: 16,
@@ -394,7 +395,8 @@ class _BattleScreenState extends State<BattleScreen>
     c.save();
 
     if (mounted) {
-      Navigator.pop(context);
+      // Wróć aż na mapę świata (przez battle + prebattle)
+      Navigator.of(context).popUntil((route) => route.settings.name == '/map');
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('Odwrót! Straty: $goldLost🪙, $captured żołnierzy'),
         backgroundColor: MColors.red,
@@ -403,53 +405,86 @@ class _BattleScreenState extends State<BattleScreen>
   }
 
   Widget _header() {
+    final pAlive = sim.playerPlatoons.where((p) => p.isAlive)
+        .fold(0, (s, p) => s + p.count);
+    final pStart = sim.playerPlatoons.fold(0, (s, p) => s + p.startCount);
+    final eAlive = sim.alivePlatoons.where((p) => !p.isPlayer)
+        .fold(0, (s, p) => s + p.count);
+    final eStart = sim.platoons.where((p) => !p.isPlayer)
+        .fold(0, (s, p) => s + p.startCount);
+    final clock = (sim.tickCount * 0.05).floor();
+
     return Container(
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            MColors.bg.withValues(alpha: 0.95),
-            MColors.bg.withValues(alpha: 0.0),
-          ],
-        ),
+          begin: Alignment.topCenter, end: Alignment.bottomCenter,
+          colors: [MColors.bgDeep, MColors.bgDeep.withValues(alpha: 0.0)]),
       ),
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 20),
-      child: Row(children: [
-        const Text('⚔️', style: TextStyle(fontSize: 18)),
-        const SizedBox(width: 6),
-        Expanded(child: Row(children: [
-          Container(width: 8, height: 8,
-              margin: const EdgeInsets.only(right: 4),
-              decoration: const BoxDecoration(
-                  color: MColors.gold, shape: BoxShape.circle)),
-          Text(
-            '${sim.playerPlatoons.where((p) => p.isAlive).fold(0, (s, p) => s + p.count)}',
-            style: const TextStyle(color: MColors.gold, fontSize: 12,
-                fontWeight: FontWeight.bold)),
-          const SizedBox(width: 10),
-          Container(width: 8, height: 8,
-              margin: const EdgeInsets.only(right: 4),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 22),
+      child: Column(children: [
+        Row(children: [
+          GestureDetector(
+            onTap: _confirmRetreat,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
-                  color: MColors.red, shape: BoxShape.circle)),
-          Text(_headerEnemyCount(),
-              style: TextStyle(color: MColors.red, fontSize: 12,
-                  fontWeight: FontWeight.bold)),
-        ])),
-        GestureDetector(
-          onTap: () => setState(() => _paused = !_paused),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: MColors.panelBg.withValues(alpha: 0.88),
-              border: Border.all(color: MColors.gold.withValues(alpha: 0.5)),
-              borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: MColors.borderWarm)),
+              child: Text('ODWRÓT', style: MFonts.label(const TextStyle(
+                  fontSize: 12, color: MColors.muted, letterSpacing: 1.6))),
             ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Text(_scenarioLabel().toUpperCase(),
+              style: MFonts.label(const TextStyle(fontSize: 12,
+                  color: MColors.faint, letterSpacing: 1.4)))),
+          Text('${clock}s', style: MFonts.label(const TextStyle(
+              fontSize: 12, color: MColors.faint, letterSpacing: 1.0))),
+          const SizedBox(width: 10),
+          GestureDetector(
+            onTap: () => setState(() => _paused = !_paused),
             child: Text(_paused ? '▶' : '⏸',
-                style: const TextStyle(color: MColors.gold, fontSize: 16)),
+                style: const TextStyle(color: MColors.gold, fontSize: 15)),
+          ),
+        ]),
+        const SizedBox(height: 12),
+        // Paski sił
+        Row(children: [
+          Expanded(child: _forceBar('TY', pAlive, pStart,
+              MColors.gold, false)),
+          const SizedBox(width: 12),
+          Expanded(child: _forceBar('WRÓG', eAlive, eStart,
+              MColors.red, true)),
+        ]),
+      ]),
+    );
+  }
+
+  String _scenarioLabel() => switch (sim.scenario) {
+    BattleScenario.openField   => 'Potyczka',
+    BattleScenario.villageRaid => 'Napad na wioskę',
+    BattleScenario.citySiege   => 'Oblężenie · mury',
+    BattleScenario.ruinsDelve  => 'Ruiny · ciasny teren',
+  };
+
+  Widget _forceBar(String label, int alive, int start, Color color,
+      bool alignRight) {
+    final frac = start == 0 ? 0.0 : (alive / start).clamp(0.0, 1.0);
+    return Column(
+      crossAxisAlignment: alignRight
+          ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      children: [
+        Text('$label $alive', style: MFonts.label(const TextStyle(
+            fontSize: 11, color: MColors.faint, letterSpacing: 1.4))),
+        const SizedBox(height: 3),
+        Container(height: 3, color: MColors.border,
+          child: FractionallySizedBox(
+            alignment: alignRight
+                ? Alignment.centerRight : Alignment.centerLeft,
+            widthFactor: frac,
+            child: Container(color: color),
           ),
         ),
-      ]),
+      ],
     );
   }
 
@@ -488,7 +523,7 @@ class _BattleScreenState extends State<BattleScreen>
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   border: Border.all(color: MColors.red.withValues(alpha: 0.6)),
-                  borderRadius: BorderRadius.circular(4),
+                  borderRadius: BorderRadius.circular(0),
                 ),
                 child: const Text('✕ ścieżka',
                     style: TextStyle(color: MColors.red, fontSize: 10)),
@@ -521,7 +556,7 @@ class _BattleScreenState extends State<BattleScreen>
           border: Border.all(
               color: isActive ? MColors.gold : MColors.borderDim,
               width: isActive ? 1.5 : 0.5),
-          borderRadius: BorderRadius.circular(5),
+          borderRadius: BorderRadius.circular(0),
         ),
         child: Column(children: [
           Text(order.emoji, style: const TextStyle(fontSize: 13)),
@@ -538,50 +573,50 @@ class _BattleScreenState extends State<BattleScreen>
   Widget _globalBar() => Container(
     decoration: BoxDecoration(
       gradient: LinearGradient(
-        begin: Alignment.bottomCenter,
-        end: Alignment.topCenter,
-        colors: [
-          MColors.panelBg.withValues(alpha: 0.97),
-          MColors.panelBg.withValues(alpha: 0.0),
-        ],
-      ),
+        begin: Alignment.bottomCenter, end: Alignment.topCenter,
+        colors: [MColors.bgDeep, MColors.bgDeep.withValues(alpha: 0.0)]),
     ),
-    padding: const EdgeInsets.fromLTRB(12, 20, 12, 14),
+    padding: const EdgeInsets.fromLTRB(14, 22, 14, 14),
     child: SafeArea(top: false, child: Column(mainAxisSize: MainAxisSize.min,
-        children: [
-      const Text('ROZKAZY GLOBALNE',
-          style: TextStyle(color: MColors.muted, fontSize: 10, letterSpacing: 1)),
-      const SizedBox(height: 7),
+        crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('ROZKAZ DLA WSZYSTKICH PLUTONÓW',
+          style: MFonts.label(const TextStyle(fontSize: 11,
+              color: MColors.dim, letterSpacing: 2.0))),
+      const SizedBox(height: 8),
       Row(children: [
-        _globalBtn('⚔ Naprzód', MColors.green, PlatoonOrder.advance),
+        _globalBtn('NAPRZÓD', MColors.greenBright, PlatoonOrder.advance),
         const SizedBox(width: 6),
-        _globalBtn('🛡 Trzymaj', MColors.muted, PlatoonOrder.hold),
+        _globalBtn('TRZYMAJ', MColors.parchment, PlatoonOrder.hold),
         const SizedBox(width: 6),
-        _globalBtn('↩ Odwrót',  MColors.red,   PlatoonOrder.retreat),
+        _globalBtn('ODWRÓT',  MColors.ember,   PlatoonOrder.retreat),
       ]),
     ])),
   );
 
-  Widget _globalBtn(String label, Color color, PlatoonOrder order) =>
-      Expanded(child: GestureDetector(
-        onTap: () => setState(() {
-          for (final p in sim.playerPlatoons.where((p) => p.isAlive)) {
-            p.order = order;
-          }
-        }),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 9),
-          decoration: BoxDecoration(
-            color: MColors.panelBg.withValues(alpha: 0.7),
-            border: Border.all(color: color.withValues(alpha: 0.5)),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          alignment: Alignment.center,
-          child: Text(label,
-              style: TextStyle(color: color, fontSize: 12,
-                  fontWeight: FontWeight.bold)),
-        ),
-      ));
+  Widget _globalBtn(String label, Color color, PlatoonOrder order) {
+    final active = sim.playerPlatoons.where((p) => p.isAlive)
+        .every((p) => p.order == order) &&
+        sim.playerPlatoons.any((p) => p.isAlive);
+    return Expanded(child: GestureDetector(
+      onTap: () => setState(() {
+        for (final p in sim.playerPlatoons.where((p) => p.isAlive)) {
+          p.order = order;
+        }
+      }),
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 11),
+        decoration: BoxDecoration(
+          color: active ? color.withValues(alpha: 0.14) : Colors.transparent,
+          border: Border.all(color: active
+              ? color : MColors.borderWarm)),
+        alignment: Alignment.center,
+        child: Text(label, style: MFonts.label(TextStyle(
+            color: active ? color : MColors.muted, fontSize: 12,
+            letterSpacing: 1.6))),
+      ),
+    ));
+  }
 }
 
 // ── Rysowanie pola bitwy ──────────────────────────────────────────────────────
@@ -842,40 +877,99 @@ class _BattlePainter extends CustomPainter {
   }
 
   void _drawWall(Canvas canvas, WallSegment w) {
-    final breached = w.isBreached || wallBreached;
-    final paint = Paint()
-      ..color = breached ? const Color(0x556A6258) : const Color(0xFF7A7268)
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.square;
-    canvas.drawLine(Offset(w.x1, w.y1), Offset(w.x2, w.y2), paint);
+    final y = w.y1;
+    // Uszkodzenie (integrity) ściemnia i "kruszy" mur wizualnie
+    final dmg = (1.0 - w.integrity).clamp(0.0, 1.0);
 
-    // Blanki
-    if (!breached) {
-      final len = (w.x2 - w.x1).abs();
-      final steps = (len / 18).floor();
-      for (var i = 0; i < steps; i++) {
-        final bx = w.x1 + i * 18 + 4;
-        canvas.drawRect(Rect.fromLTWH(bx, w.y1 - 11, 9, 6),
-            Paint()..color = const Color(0xFF8A8278));
+    if (w.isBreached) {
+      // Cały segment zburzony — sam gruz
+      _drawRubble(canvas, w.x1, w.x2, y);
+      return;
+    }
+
+    // Zbierz przedziały przejść (wyrwy + drabiny) posortowane po x
+    final openings = <(double, double)>[]; // (start, end)
+    for (final (cx, bw) in w.breaches) {
+      openings.add((cx - bw / 2, cx + bw / 2));
+    }
+    for (final lx in w.ladderPoints) {
+      openings.add((lx - 20, lx + 20));
+    }
+    openings.sort((a, b) => a.$1.compareTo(b.$1));
+
+    // Rysuj mur w kawałkach, pomijając przejścia
+    final wallColor = Color.lerp(
+        const Color(0xFF7A7268), const Color(0xFF5A5248), dmg)!;
+    var cursor = w.x1;
+    for (final (os, oe) in openings) {
+      final segEnd = os.clamp(w.x1, w.x2);
+      if (segEnd > cursor) {
+        _drawWallChunk(canvas, cursor, segEnd, y, wallColor, dmg);
       }
-      // Brama
-      if (w.hasGate) {
-        final gx = (w.x1 + w.x2) / 2;
-        canvas.drawRect(Rect.fromLTWH(gx - 18, w.y1 - 8, 36, 16),
-            Paint()..color = const Color(0xFF4A3520));
-        canvas.drawRect(Rect.fromLTWH(gx - 18, w.y1 - 8, 36, 16),
+      cursor = oe.clamp(w.x1, w.x2);
+      // Gruz w miejscu wyrwy
+      _drawRubble(canvas, os.clamp(w.x1, w.x2), oe.clamp(w.x1, w.x2), y);
+    }
+    if (cursor < w.x2) {
+      _drawWallChunk(canvas, cursor, w.x2, y, wallColor, dmg);
+    }
+
+    // Brama (jeśli nie wybita)
+    if (w.hasGate) {
+      final gx = (w.x1 + w.x2) / 2;
+      final gateOpen = w.hasOpeningAt(gx);
+      if (!gateOpen) {
+        canvas.drawRect(Rect.fromLTWH(gx - 18, y - 8, 36, 16),
+            Paint()..color = Color.lerp(
+                const Color(0xFF4A3520), const Color(0xFF2A1E14), dmg)!);
+        canvas.drawRect(Rect.fromLTWH(gx - 18, y - 8, 36, 16),
             Paint()..color = const Color(0xFF2A1D10)
                    ..style = PaintingStyle.stroke..strokeWidth = 2);
+        // Rysy przy uszkodzeniu bramy
+        if (dmg > 0.3) {
+          final rng = Random(gx.toInt());
+          for (var i = 0; i < (dmg * 4).round(); i++) {
+            final rx = gx - 14 + rng.nextDouble() * 28;
+            canvas.drawLine(Offset(rx, y - 6), Offset(rx + 2, y + 6),
+                Paint()..color = const Color(0xFF1A120A)..strokeWidth = 1);
+          }
+        }
       }
-    } else {
-      // Gruz po wyłomie
-      final rng = Random(w.x1.toInt());
-      for (var i = 0; i < 6; i++) {
-        final rx = w.x1 + rng.nextDouble() * (w.x2 - w.x1);
-        final ry = w.y1 + (rng.nextDouble() - 0.5) * 16;
-        canvas.drawCircle(Offset(rx, ry), 3 + rng.nextDouble() * 4,
-            Paint()..color = const Color(0x996A6258));
+    }
+  }
+
+  void _drawWallChunk(Canvas canvas, double x1, double x2, double y,
+      Color color, double dmg) {
+    canvas.drawLine(Offset(x1, y), Offset(x2, y), Paint()
+      ..color = color..strokeWidth = 14..strokeCap = StrokeCap.butt);
+    // Blanki
+    final steps = ((x2 - x1) / 18).floor();
+    for (var i = 0; i < steps; i++) {
+      final bx = x1 + i * 18 + 4;
+      if (bx + 9 > x2) break;
+      canvas.drawRect(Rect.fromLTWH(bx, y - 11, 9, 6),
+          Paint()..color = Color.lerp(
+              const Color(0xFF8A8278), const Color(0xFF6A6258), dmg)!);
+    }
+    // Rysy pęknięć przy uszkodzeniu
+    if (dmg > 0.25) {
+      final rng = Random((x1 * 7).toInt());
+      for (var i = 0; i < (dmg * 5).round(); i++) {
+        final rx = x1 + rng.nextDouble() * (x2 - x1);
+        canvas.drawLine(Offset(rx, y - 5), Offset(rx + rng.nextDouble()*4-2, y + 5),
+            Paint()..color = const Color(0xFF2A2620)..strokeWidth = 1);
       }
+    }
+  }
+
+  void _drawRubble(Canvas canvas, double x1, double x2, double y) {
+    final rng = Random((x1 * 13).toInt());
+    final n = ((x2 - x1) / 12).round().clamp(3, 20);
+    for (var i = 0; i < n; i++) {
+      final rx = x1 + rng.nextDouble() * (x2 - x1);
+      final ry = y + (rng.nextDouble() - 0.4) * 14;
+      canvas.drawCircle(Offset(rx, ry), 2 + rng.nextDouble() * 4,
+          Paint()..color = const Color(0xCC5A5248));
     }
   }
 
@@ -940,25 +1034,133 @@ class _BattlePainter extends CustomPainter {
   void _drawSiegeEngine(Canvas canvas, Platoon p) {
     final eng = p.engine!;
     final cx = p.x, cy = p.y;
-    // Cień
-    canvas.drawRect(Rect.fromCenter(center: Offset(cx+2, cy+3), width: 30, height: 22),
-        Paint()..color = const Color(0x66000000));
-    // Korpus
-    final body = Rect.fromCenter(center: Offset(cx, cy), width: 28, height: 20);
-    canvas.drawRect(body, Paint()..color = const Color(0xFF6B4A2A));
-    canvas.drawRect(body, Paint()
-      ..color = (p.engineWorking ? MColors.gold : const Color(0xFF3A2A18))
-      ..style = PaintingStyle.stroke..strokeWidth = 2);
-    // Ikona
-    final tp = TextPainter(
-      text: TextSpan(text: eng.emoji, style: const TextStyle(fontSize: 14)),
-      textDirection: TextDirection.ltr)..layout();
-    tp.paint(canvas, Offset(cx - tp.width/2, cy - tp.height/2));
-    // Wskaźnik pracy
-    if (p.engineWorking) {
-      canvas.drawCircle(Offset(cx, cy - 18), 4,
-          Paint()..color = MColors.gold);
+    final working = p.engineWorking;
+    // HP machiny (count = wytrzymałość) do paska zniszczeń
+    final hp = (p.count / p.startCount).clamp(0.0, 1.0);
+
+    // Paleta drewna
+    const wood   = Color(0xFF6B4A2A);
+    const woodLt = Color(0xFF835B36);
+    const woodDk = Color(0xFF4A3320);
+    const iron   = Color(0xFF3E3A34);
+    final accent = working ? MColors.goldBright : const Color(0xFF3A2A18);
+
+    switch (eng) {
+      case SiegeEngine.ladders:
+        _drawLadders(canvas, cx, cy, wood, woodLt, accent);
+      case SiegeEngine.ram:
+        _drawRam(canvas, cx, cy, wood, woodLt, woodDk, iron, accent);
+      case SiegeEngine.catapult:
+        _drawCatapult(canvas, cx, cy, wood, woodLt, woodDk, iron, accent);
     }
+
+    // Pasek wytrzymałości pod machiną (gdy uszkodzona)
+    if (hp < 0.999) {
+      const bw = 26.0;
+      final bx = cx - bw / 2, by = cy + 16;
+      canvas.drawRect(Rect.fromLTWH(bx, by, bw, 3),
+          Paint()..color = const Color(0xAA000000));
+      canvas.drawRect(Rect.fromLTWH(bx, by, bw * hp, 3),
+          Paint()..color = hp > 0.4
+              ? const Color(0xFF6A7A4A) : const Color(0xFFC0492A));
+    }
+
+    // Iskra pracy nad machiną
+    if (working) {
+      canvas.drawCircle(Offset(cx, cy - 22), 3.5,
+          Paint()..color = MColors.goldBright);
+      canvas.drawCircle(Offset(cx, cy - 22), 6,
+          Paint()
+            ..color = MColors.gold.withValues(alpha: 0.3)
+            ..style = PaintingStyle.stroke..strokeWidth = 1.5);
+    }
+  }
+
+  /// Drabiny szturmowe — dwie belki z szczeblami, oparte skośnie.
+  void _drawLadders(Canvas canvas, double cx, double cy,
+      Color wood, Color woodLt, Color accent) {
+    canvas.drawCircle(Offset(cx + 2, cy + 12), 9,
+        Paint()..color = const Color(0x44000000)); // cień u podstawy
+    canvas.save();
+    canvas.translate(cx, cy);
+    canvas.rotate(-0.32); // lekkie pochylenie
+    final rail = Paint()..color = woodLt..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    // Dwie podłużnice
+    canvas.drawLine(const Offset(-5, 14), const Offset(-5, -16), rail);
+    canvas.drawLine(const Offset(5, 14), const Offset(5, -16), rail);
+    // Szczeble
+    final rung = Paint()..color = wood..strokeWidth = 2.2;
+    for (var y = -14; y <= 12; y += 6) {
+      canvas.drawLine(Offset(-5, y.toDouble()), Offset(5, y.toDouble()), rung);
+    }
+    canvas.restore();
+    // Obrys akcentu (praca/postój)
+    canvas.drawCircle(Offset(cx, cy), 15, Paint()
+      ..color = accent.withValues(alpha: 0.35)
+      ..style = PaintingStyle.stroke..strokeWidth = 1.5);
+  }
+
+  /// Taran — belka z okutą głowicą pod dwuspadowym daszkiem na kołach.
+  void _drawRam(Canvas canvas, double cx, double cy,
+      Color wood, Color woodLt, Color woodDk, Color iron, Color accent) {
+    canvas.drawRect(Rect.fromCenter(
+        center: Offset(cx + 2, cy + 12), width: 34, height: 8),
+        Paint()..color = const Color(0x55000000));
+    // Koła
+    for (final dx in [-11.0, 11.0]) {
+      canvas.drawCircle(Offset(cx + dx, cy + 10), 4, Paint()..color = woodDk);
+      canvas.drawCircle(Offset(cx + dx, cy + 10), 4, Paint()
+        ..color = iron..style = PaintingStyle.stroke..strokeWidth = 1.5);
+    }
+    // Belka tarana (pozioma)
+    canvas.drawRect(Rect.fromCenter(
+        center: Offset(cx, cy + 3), width: 30, height: 5),
+        Paint()..color = woodLt);
+    // Okuta głowica (przód = lewa strona, w stronę muru/góry)
+    canvas.drawCircle(Offset(cx - 15, cy + 3), 4, Paint()..color = iron);
+    // Daszek ochronny (dwuspadowy)
+    final roof = Path()
+      ..moveTo(cx - 16, cy - 2)
+      ..lineTo(cx, cy - 12)
+      ..lineTo(cx + 16, cy - 2)
+      ..close();
+    canvas.drawPath(roof, Paint()..color = wood);
+    canvas.drawPath(roof, Paint()
+      ..color = accent..style = PaintingStyle.stroke..strokeWidth = 1.8);
+  }
+
+  /// Katapulta — rama z odciągniętym ramieniem i przeciwwagą.
+  void _drawCatapult(Canvas canvas, double cx, double cy,
+      Color wood, Color woodLt, Color woodDk, Color iron, Color accent) {
+    canvas.drawRect(Rect.fromCenter(
+        center: Offset(cx + 2, cy + 13), width: 32, height: 8),
+        Paint()..color = const Color(0x55000000));
+    // Koła
+    for (final dx in [-10.0, 10.0]) {
+      canvas.drawCircle(Offset(cx + dx, cy + 11), 4, Paint()..color = woodDk);
+      canvas.drawCircle(Offset(cx + dx, cy + 11), 4, Paint()
+        ..color = iron..style = PaintingStyle.stroke..strokeWidth = 1.5);
+    }
+    // Podstawa ramy
+    canvas.drawRect(Rect.fromCenter(
+        center: Offset(cx, cy + 6), width: 26, height: 4),
+        Paint()..color = wood);
+    // Pionowy stojak
+    canvas.drawLine(Offset(cx, cy + 5), Offset(cx, cy - 8),
+        Paint()..color = woodLt..strokeWidth = 3);
+    // Ramię miotające (odciągnięte do tyłu-dołu)
+    canvas.drawLine(Offset(cx, cy - 7), Offset(cx + 15, cy + 4),
+        Paint()..color = woodLt..strokeWidth = 3..strokeCap = StrokeCap.round);
+    // Kosz z pociskiem na końcu ramienia
+    canvas.drawCircle(Offset(cx + 15, cy + 4), 3.5, Paint()..color = iron);
+    // Przeciwwaga z przodu
+    canvas.drawRect(Rect.fromCenter(
+        center: Offset(cx - 10, cy - 2), width: 7, height: 9),
+        Paint()..color = woodDk);
+    // Akcent na stojaku
+    canvas.drawLine(Offset(cx, cy + 5), Offset(cx, cy - 8),
+        Paint()..color = accent.withValues(alpha: 0.5)..strokeWidth = 1);
   }
 
   void _drawPlatoon(Canvas canvas, Platoon p, List<Platoon> friendlies) {
@@ -1236,58 +1438,140 @@ class _ResultDialog extends StatelessWidget {
         .toList();
     campaign.resolveBattle(
         casualties: casualties, victory: won, lootGold: loot);
+
+    // Warunki zleceń szkoleniowych (z BattleResult, nie z sim)
+    if (won) {
+      final pr = result.platoonResults;
+      final playerStart = pr.where((r) => r.isPlayer)
+          .fold(0, (s, r) => s + r.startCount);
+      final playerAlive = pr.where((r) => r.isPlayer)
+          .fold(0, (s, r) => s + r.survivors);
+      final enemyStart = pr.where((r) => !r.isPlayer)
+          .fold(0, (s, r) => s + r.startCount);
+      final archers = pr.where((r) => r.isPlayer && r.type == UnitType.archers)
+          .fold(0, (s, r) => s + r.startCount);
+      final earnedPerks = campaign.checkTrainingConditions(
+        scenario: result.scenarioIndex,
+        lostAny: playerAlive < playerStart,
+        wasOutnumbered: enemyStart > playerStart,
+        archerMajority: playerStart > 0 && archers > playerStart / 2,
+        wasChasePursuit: false,
+      );
+      if (earnedPerks.isNotEmpty) {
+        campaign.pendingTrainingPerks = earnedPerks;
+      }
+    }
     campaign.save();
 
     return Dialog(
       backgroundColor: MColors.panelBg,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: BorderSide(color: won ? MColors.green : MColors.red, width: 2),
+        borderRadius: BorderRadius.circular(0),
+        side: BorderSide(
+            color: won ? MColors.green : MColors.ember, width: 1.5),
       ),
       child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Text(won ? '🏆 Zwycięstwo!' : '💀 Porażka',
-              style: TextStyle(
-                  color: won ? MColors.green : MColors.red,
-                  fontSize: 22, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
+        padding: const EdgeInsets.fromLTRB(22, 22, 22, 18),
+        child: Column(mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Text(won ? 'Zwycięstwo' : 'Klęska',
+              textAlign: TextAlign.center,
+              style: MFonts.display(TextStyle(
+                  color: won ? MColors.greenBright : MColors.ember,
+                  fontSize: 28, height: 1))),
+          const SizedBox(height: 4),
+          Text(won ? 'POLE NALEŻY DO CIEBIE' : 'MUSIAŁEŚ USTĄPIĆ',
+              textAlign: TextAlign.center, style: MText.subtitle),
+          const SizedBox(height: 18),
+          Container(height: 1, color: MColors.borderDim),
+          const SizedBox(height: 12),
+          // Straty per pluton
           ...result.platoonResults.where((r) => r.isPlayer).map((r) =>
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 3),
+              padding: const EdgeInsets.symmetric(vertical: 4),
               child: Row(children: [
-                Text(r.type.emoji, style: const TextStyle(fontSize: 16)),
-                const SizedBox(width: 6),
-                Expanded(child: Text(r.type.plName,
-                    style: const TextStyle(color: MColors.cream, fontSize: 13))),
-                Text('✝ ${r.dead}  🤕 ${r.wounded}  ✓ ${r.survivors}',
-                    style: const TextStyle(color: MColors.muted, fontSize: 11)),
+                Transform.rotate(angle: 0.785, child: Container(
+                    width: 6, height: 6,
+                    color: MColors.unitColor(r.type))),
+                const SizedBox(width: 9),
+                Expanded(child: Text(r.type.plName.toUpperCase(),
+                    style: MFonts.label(const TextStyle(
+                        color: MColors.bone, fontSize: 13,
+                        letterSpacing: 0.6)))),
+                _resultStat('${r.survivors}', MColors.greenBright, 'ŻYWI'),
+                const SizedBox(width: 10),
+                _resultStat('${r.wounded}', MColors.gold, 'RANNI'),
+                const SizedBox(width: 10),
+                _resultStat('${r.dead}', MColors.ember, 'PADLI'),
+                if (r.xpGained > 0) ...[
+                  const SizedBox(width: 10),
+                  _resultStat('+${r.xpGained}', MColors.parchment, 'XP'),
+                ],
               ]),
             ),
           ),
           const SizedBox(height: 12),
+          Container(height: 1, color: MColors.borderDim),
+          const SizedBox(height: 12),
+          // Łup
           Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            const Text('🪙 ', style: TextStyle(fontSize: 16)),
-            Text('+$loot złota',
-                style: const TextStyle(color: MColors.gold,
-                    fontSize: 16, fontWeight: FontWeight.bold)),
+            Transform.rotate(angle: 0.785, child: Container(
+                width: 7, height: 7, color: MColors.gold)),
+            const SizedBox(width: 7),
+            Text('$loot', style: MFonts.label(const TextStyle(
+                color: MColors.goldBright, fontSize: 20))),
+            const SizedBox(width: 4),
+            Text('ZŁOTA ZDOBYTE', style: MFonts.label(const TextStyle(
+                color: MColors.faint, fontSize: 12, letterSpacing: 1.4))),
           ]),
-          const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: onClose,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: MColors.panelLight,
-                foregroundColor: MColors.cream,
-                side: const BorderSide(color: MColors.gold),
-                padding: const EdgeInsets.symmetric(vertical: 12),
-              ),
-              child: const Text('Wróć do obozu'),
+          // Perk kapitana zdobyty za zlecenie szkoleniowe
+          if (campaign.pendingTrainingPerks.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Container(height: 1, color: MColors.borderDim),
+            const SizedBox(height: 10),
+            ...campaign.pendingTrainingPerks.map((perk) => Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                Text('⭐', style: const TextStyle(fontSize: 16)),
+                const SizedBox(width: 6),
+                Text('PERK: ${perk.plName}', style: MFonts.label(const TextStyle(
+                    color: MColors.goldBright, fontSize: 13,
+                    letterSpacing: 1))),
+              ]),
+            )),
+            Text('Przypisz go kapitanowi w Koszarach',
+                textAlign: TextAlign.center,
+                style: MFonts.body(const TextStyle(
+                    color: MColors.faint, fontSize: 10))),
+          ],
+          const SizedBox(height: 18),
+          GestureDetector(
+            onTap: onClose,
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 13),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: (won ? MColors.green : MColors.ember)
+                    .withValues(alpha: 0.12),
+                border: Border.all(
+                    color: won ? MColors.green : MColors.ember)),
+              child: Text('WRÓĆ NA MAPĘ', style: MFonts.label(TextStyle(
+                  color: won ? MColors.greenBright : MColors.emberBright,
+                  fontSize: 14, letterSpacing: 2.0))),
             ),
           ),
         ]),
       ),
     );
   }
+
+  /// Mała statystyka wyniku: liczba nad rozstrzeloną etykietą.
+  Widget _resultStat(String value, Color color, String label) => Column(
+    mainAxisSize: MainAxisSize.min, children: [
+      Text(value, style: MFonts.label(TextStyle(
+          color: color, fontSize: 14))),
+      Text(label, style: MFonts.label(const TextStyle(
+          color: MColors.dim, fontSize: 9, letterSpacing: 0.8))),
+    ]);
 }

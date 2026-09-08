@@ -1,21 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'engine/campaign_state.dart';
+import 'engine/audio.dart';
 import 'l10n/locale_notifier.dart';
-import 'ui/map_screen.dart';
+import 'ui/menu_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final campaign      = await CampaignState.loadOrNew();
   final localeNotifier = await LocaleNotifier.load();
-  runApp(MercfallApp(campaign: campaign, localeNotifier: localeNotifier));
+  await MusicManager.instance.init();
+  runApp(MercfallApp(localeNotifier: localeNotifier));
 }
 
 class MercfallApp extends StatelessWidget {
-  final CampaignState campaign;
   final LocaleNotifier localeNotifier;
-  const MercfallApp({super.key,
-    required this.campaign, required this.localeNotifier});
+  const MercfallApp({super.key, required this.localeNotifier});
 
   @override
   Widget build(BuildContext context) {
@@ -32,7 +30,7 @@ class MercfallApp extends StatelessWidget {
           GlobalCupertinoLocalizations.delegate,
         ],
         theme: ThemeData(brightness: Brightness.dark),
-        home: MapScreen(campaign: campaign, localeNotifier: localeNotifier),
+        home: MenuScreen(localeNotifier: localeNotifier),
       ),
     );
   }

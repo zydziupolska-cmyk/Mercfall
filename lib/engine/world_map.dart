@@ -4,6 +4,12 @@ import 'factions.dart';
 import 'food.dart';
 import 'army.dart';
 
+/// Lekki punkt 2D dla tras (silnik nie zależy od dart:ui/Offset).
+class MapPoint {
+  final double dx, dy;
+  const MapPoint(this.dx, this.dy);
+}
+
 // ── Biomy ─────────────────────────────────────────────────────────────────────
 
 enum Biome { water, plains, forest, hills, mountain }
@@ -194,6 +200,8 @@ class WorldMap {
   double? destX, destY;
   /// ID osady z której właśnie wychodzimy — ignorujemy ją w stop-check podczas opuszczania.
   String? _departingFrom;
+  /// Tryb pościgu — gdy true, advance() nie zatrzymuje się w osadach po drodze.
+  bool chasing = false;
   DateTime? lastMoveTick;
 
   // Generatory terenu (odtwarzane z seeda, nie zapisywane)
@@ -253,33 +261,145 @@ class WorldMap {
 
   bool get isMoving => destX != null && destY != null;
 
+  /// Waypointy trasy wyznaczonej A* przy starcie podróży (omijają przeszkody).
+  final List<MapPoint> _path = [];
+  int _pathIndex = 0;
+  /// Czy trasa jest w trakcie wyznaczania (pokazuje wskaźnik "obliczam…").
+  bool computingPath = false;
+
   void setDestination(double x, double y) {
     destX = x.clamp(0.0, worldW);
     destY = y.clamp(0.0, worldH);
     lastMoveTick = DateTime.now();
+    _detourDir = 0;
+    _detourTime = 0;
+
+    // Podczas pościgu pomijamy CAŁĄ logikę osad — idziemy wprost do bandyty.
+    // Inaczej ciągłe przeliczanie co 0.4s wypychałoby postać z miasta w kółko.
+    if (chasing) {
+      _path.clear();
+      _pathIndex = 0;
+      return;
+    }
+
     _departingFrom = settlementHere?.id;
 
-    // Jeśli stoimy w osadzie — natychmiast wypchnij postać o 38j od centrum
-    // (próg zatrzymania = 35j, więc będziemy już poza nim i advance() nie zatrzyma).
+    // Wypchnij z osady jak wcześniej
     if (_departingFrom != null) {
       final near = _settlementsAt(partyX, partyY);
       if (near.isNotEmpty) {
         final s = near.first;
-        // Kierunek: od centrum osady ku celowi
         final dx = destX! - s.x, dy = destY! - s.y;
         final d = sqrt(dx * dx + dy * dy).clamp(0.001, 99999.0);
         final nx = s.x + dx / d * 38.0;
         final ny = s.y + dy / d * 38.0;
         if (passableAt(nx, ny)) {
-          partyX = nx;
-          partyY = ny;
-          _departingFrom = null; // już poza strefą stopu
+          partyX = nx; partyY = ny;
+          _departingFrom = null;
         }
       }
     }
+
+    // Wyznacz trasę omijającą przeszkody (A* na zgrubnej siatce).
+    _path.clear();
+    _pathIndex = 0;
+    final route = _findPath(partyX, partyY, destX!, destY!);
+    if (route != null) _path.addAll(route);
   }
 
-  void stop() { destX = null; destY = null; lastMoveTick = null; }
+  /// A* na siatce ~120j. Zwraca listę punktów świata albo null gdy brak trasy.
+  List<MapPoint>? _findPath(double sx, double sy, double tx, double ty) {
+    const cell = 120.0;
+    final cols = (worldW / cell).ceil();
+    final rows = (worldH / cell).ceil();
+    (int, int) toCell(double x, double y) =>
+        ((x / cell).floor().clamp(0, cols - 1),
+         (y / cell).floor().clamp(0, rows - 1));
+    MapPoint toWorld(int cx, int cy) =>
+        MapPoint((cx + 0.5) * cell, (cy + 0.5) * cell);
+    bool cellOpen(int cx, int cy) =>
+        passableAt((cx + 0.5) * cell, (cy + 0.5) * cell);
+
+    final start = toCell(sx, sy);
+    final goal = toCell(tx, ty);
+    if (start == goal) return [MapPoint(tx, ty)];
+
+    // Jeśli linia prosta jest wolna — nie kombinuj, idź wprost
+    if (_lineClear(sx, sy, tx, ty)) return [MapPoint(tx, ty)];
+
+    final open = <(int, int)>[start];
+    final cameFrom = <(int, int), (int, int)>{};
+    final gScore = <(int, int), double>{start: 0};
+    double h((int, int) c) =>
+        ((c.$1 - goal.$1).abs() + (c.$2 - goal.$2).abs()).toDouble();
+    final fScore = <(int, int), double>{start: h(start)};
+
+    var guard = 0;
+    while (open.isNotEmpty && guard++ < 6000) {
+      open.sort((a, b) => (fScore[a] ?? 1e9).compareTo(fScore[b] ?? 1e9));
+      final current = open.removeAt(0);
+      if (current == goal) {
+        // Odtwórz ścieżkę
+        final cells = <(int, int)>[current];
+        var c = current;
+        while (cameFrom.containsKey(c)) { c = cameFrom[c]!; cells.add(c); }
+        final pts = <MapPoint>[];
+        for (var i = cells.length - 1; i >= 0; i--) {
+          pts.add(toWorld(cells[i].$1, cells[i].$2));
+        }
+        pts.add(MapPoint(tx, ty));
+        return _smoothPath(pts);
+      }
+      for (final (dx, dy) in const [(1,0),(-1,0),(0,1),(0,-1),
+                                     (1,1),(1,-1),(-1,1),(-1,-1)]) {
+        final nx = current.$1 + dx, ny = current.$2 + dy;
+        if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+        if (!cellOpen(nx, ny)) continue;
+        final neighbor = (nx, ny);
+        final cost = (dx != 0 && dy != 0) ? 1.414 : 1.0;
+        final tentative = (gScore[current] ?? 1e9) + cost;
+        if (tentative < (gScore[neighbor] ?? 1e9)) {
+          cameFrom[neighbor] = current;
+          gScore[neighbor] = tentative;
+          fScore[neighbor] = tentative + h(neighbor);
+          if (!open.contains(neighbor)) open.add(neighbor);
+        }
+      }
+    }
+    return null; // brak trasy
+  }
+
+  /// Usuwa zbędne waypointy: jeśli z A można dojść prosto do C, pomiń B.
+  List<MapPoint> _smoothPath(List<MapPoint> pts) {
+    if (pts.length <= 2) return pts;
+    final out = <MapPoint>[pts.first];
+    var anchor = 0;
+    for (var i = 2; i < pts.length; i++) {
+      if (!_lineClear(pts[anchor].dx, pts[anchor].dy, pts[i].dx, pts[i].dy)) {
+        out.add(pts[i - 1]);
+        anchor = i - 1;
+      }
+    }
+    out.add(pts.last);
+    return out;
+  }
+
+  /// Czy linia prosta między punktami jest cała przejezdna (próbkowanie).
+  bool _lineClear(double ax, double ay, double bx, double by) {
+    final dist = sqrt((bx-ax)*(bx-ax) + (by-ay)*(by-ay));
+    final steps = (dist / 40).ceil().clamp(1, 400);
+    for (var i = 1; i <= steps; i++) {
+      final t = i / steps;
+      if (!passableAt(ax + (bx-ax)*t, ay + (by-ay)*t)) return false;
+    }
+    return true;
+  }
+
+  void stop() {
+    destX = null; destY = null; lastMoveTick = null;
+    _path.clear(); _pathIndex = 0;
+    chasing = false;
+  }
 
   /// Przesuwa oddział ku celowi. [dtSeconds] = czas od ostatniego kroku.
   /// Zwraca listę osad, do których właśnie dotarliśmy (zwykle 0 lub 1).
@@ -291,23 +411,47 @@ class WorldMap {
 
   List<Settlement> advance(double dtSeconds) {
     if (!isMoving) return const [];
-    final tx = destX!, ty = destY!;
+    final finalX = destX!, finalY = destY!;
+
+    // Cel bieżącego kroku = następny waypoint trasy (albo cel końcowy)
+    double tx = finalX, ty = finalY;
+    if (_path.isNotEmpty && _pathIndex < _path.length) {
+      // Przeskocz waypointy które już osiągnęliśmy
+      while (_pathIndex < _path.length) {
+        final wp = _path[_pathIndex];
+        final wdx = wp.dx - partyX, wdy = wp.dy - partyY;
+        if (sqrt(wdx*wdx + wdy*wdy) < 30) {
+          _pathIndex++;
+        } else {
+          break;
+        }
+      }
+      if (_pathIndex < _path.length) {
+        tx = _path[_pathIndex].dx;
+        ty = _path[_pathIndex].dy;
+      }
+    }
+
     final dx = tx - partyX, dy = ty - partyY;
     final dist = sqrt(dx * dx + dy * dy);
 
-    if (dist < 4) { // dotarł do celu
-      partyX = tx; partyY = ty;
+    // Dotarcie do CELU KOŃCOWEGO (nie tylko waypointu)
+    final fdx = finalX - partyX, fdy = finalY - partyY;
+    if (sqrt(fdx*fdx + fdy*fdy) < 4) {
+      partyX = finalX; partyY = finalY;
       stop();
       _detourDir = 0; _detourTime = 0;
+      _path.clear(); _pathIndex = 0;
       return _settlementsAt(partyX, partyY);
     }
 
     final speed = speedAt(partyX, partyY);
     var step = speed * dtSeconds;
-    if (step > dist) step = dist;
+    if (dist > 0 && step > dist) step = dist;
 
-    // Kierunek do celu (znormalizowany)
-    final ux = dx / dist, uy = dy / dist;
+    // Kierunek do bieżącego waypointu (znormalizowany)
+    final ux = dist > 0 ? dx / dist : 0.0;
+    final uy = dist > 0 ? dy / dist : 0.0;
 
     // 1. Spróbuj iść prosto
     if (_canWalk(partyX + ux * step, partyY + uy * step)) {
@@ -326,14 +470,19 @@ class WorldMap {
         // Ta strona zablokowana — spróbuj drugiej
         _detourDir = -_detourDir;
         if (!_trySlide(ux, uy, step, _detourDir)) {
-          // Całkiem zablokowane (np. w rogu) — zatrzymaj się
+          // Całkiem zablokowane. Podczas pościgu NIE zatrzymuj się —
+          // bandyta się rusza, za chwilę droga się odblokuje.
+          if (chasing) {
+            _detourDir = 0;
+            return const [];
+          }
           stop();
           _detourDir = 0; _detourTime = 0;
           return const [];
         }
       }
-      // Zabezpieczenie: zbyt długi objazd = rezygnacja
-      if (_detourTime > 25) {
+      // Zabezpieczenie: zbyt długi objazd = rezygnacja (nie podczas pościgu)
+      if (_detourTime > 25 && !chasing) {
         stop();
         _detourDir = 0; _detourTime = 0;
         return const [];
@@ -343,11 +492,11 @@ class WorldMap {
     // Czy weszliśmy do NOWEJ osady?
     // Zatrzymujemy się tylko gdy osada jest CELEM podróży —
     // przejazd obok/przez osadę nie przerywa marszu.
+    // Podczas pościgu (chasing) nigdy nie zatrzymujemy się w osadzie.
     final near = _settlementsAt(partyX, partyY)
         .where((s) => s.id != _departingFrom).toList();
-    if (near.isNotEmpty) {
-      // Czy cel podróży leży w tej osadzie?
-      final destIsHere = near.any((s) => s.distanceTo(tx, ty) < 90);
+    if (near.isNotEmpty && !chasing) {
+      final destIsHere = near.any((s) => s.distanceTo(finalX, finalY) < 90);
       if (destIsHere) {
         _departingFrom = null;
         stop();
@@ -439,15 +588,6 @@ class WorldMap {
 
   // ── Generator ───────────────────────────────────────────────────────────────
 
-  static const _cityNames = ['Kamienny Bród', 'Żelazna Brama', 'Srebrny Szczyt',
-      'Wieża Wichrów', 'Złota Przystań'];
-  static const _villageNames = [
-    'Żytnia Wola', 'Sosnówka', 'Brzozów', 'Lipowo', 'Dębnik', 'Wierzbnik'];
-  static const _ruinsNames = ['Stara Wieża', 'Ruiny Zamku', 'Zniszczony Fort',
-      'Zapadła Krypta'];
-  static const _campNames = ['Jaszczurcze Wzgórze', 'Mroczna Kotlina',
-      'Kruczy Jar', 'Wilcze Doły'];
-
   static WorldMap generate(Random rng) {
     final seed = rng.nextInt(1 << 30);
     final genRng = Random(seed);
@@ -462,17 +602,24 @@ class WorldMap {
     final settlements = <Settlement>[];
     var idx = 0;
 
-    /// Szuka wolnego, przejezdnego miejsca w pobliżu punktu.
+    /// Szuka miejsca z LOSOWYM progiem odległości per para — daje organiczny,
+    /// nieregularny rozkład zamiast sztucznie "upakowanego" wzoru.
     (double, double)? findSpot(double cx, double cy, double spread,
-        double minDist) {
-      for (var t = 0; t < 240; t++) {
+        double mindLo, double mindHi) {
+      for (var t = 0; t < 600; t++) {
         final x = (cx + (rng.nextDouble() - 0.5) * spread)
-            .clamp(120.0, worldW - 120);
+            .clamp(150.0, worldW - 150);
         final y = (cy + (rng.nextDouble() - 0.5) * spread)
-            .clamp(120.0, worldH - 120);
+            .clamp(150.0, worldH - 150);
         if (!passable(x, y)) continue;
-        if (settlements.any((s) => s.distanceTo(x, y) < minDist)) continue;
-        return (x, y);
+        // Każda para (kandydat, istniejąca) ma swój losowy próg —
+        // to niszczy regularność siatki.
+        var ok = true;
+        for (final p in settlements) {
+          final thresh = mindLo + rng.nextDouble() * (mindHi - mindLo);
+          if (p.distanceTo(x, y) < thresh) { ok = false; break; }
+        }
+        if (ok) return (x, y);
       }
       return null;
     }
@@ -484,7 +631,7 @@ class WorldMap {
       var nameIdx  = 0;
 
       // Stolica — blisko środka terytorium
-      final capSpot = findSpot(center.$1, center.$2, worldW * 0.15, 1000);
+      final capSpot = findSpot(center.$1, center.$2, worldW * 0.16, 700, 1050);
       if (capSpot != null) {
         settlements.add(Settlement(
           id: 'set_$idx', type: SettlementType.city,
@@ -497,7 +644,7 @@ class WorldMap {
       // 3 zwykłe miasta
       const cityCount = 3;
       for (var i = 0; i < cityCount; i++) {
-        final spot = findSpot(center.$1, center.$2, worldW * 0.50, 1000);
+        final spot = findSpot(center.$1, center.$2, worldW * 0.55, 650, 1200);
         if (spot == null) continue;
         settlements.add(Settlement(
           id: 'set_$idx', type: SettlementType.city,
@@ -509,7 +656,7 @@ class WorldMap {
       // 5 wiosek
       const villageCount = 5;
       for (var i = 0; i < villageCount; i++) {
-        final spot = findSpot(center.$1, center.$2, worldW * 0.62, 1000);
+        final spot = findSpot(center.$1, center.$2, worldW * 0.68, 600, 1350);
         if (spot == null) continue;
         settlements.add(Settlement(
           id: 'set_$idx', type: SettlementType.village,
@@ -526,7 +673,7 @@ class WorldMap {
         'Kruczy Jar', 'Wilcze Doły'];
 
     for (var i = 0; i < 4; i++) {
-      final spot = findSpot(worldW * 0.5, worldH * 0.5, worldW * 1.8, 1000);
+      final spot = findSpot(worldW * 0.5, worldH * 0.5, worldW * 1.8, 600, 1400);
       if (spot == null) continue;
       settlements.add(Settlement(
         id: 'set_$idx', type: SettlementType.ruins,
@@ -535,7 +682,7 @@ class WorldMap {
       idx++;
     }
     for (var i = 0; i < 4; i++) {
-      final spot = findSpot(worldW * 0.5, worldH * 0.5, worldW * 1.8, 1000);
+      final spot = findSpot(worldW * 0.5, worldH * 0.5, worldW * 1.8, 600, 1400);
       if (spot == null) continue;
       settlements.add(Settlement(
         id: 'set_$idx', type: SettlementType.banditCamp,

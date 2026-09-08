@@ -25,20 +25,20 @@ class _TraderScreenState extends State<TraderScreen> {
   CampaignState get c => widget.campaign;
   Settlement    get s => widget.settlement;
   bool get isCity => s.type == SettlementType.city;
+  bool get isOwned => c.ownsSettlement(s.id);
 
   void _refresh() { c.save(); setState(() {}); }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: MColors.bg,
+      backgroundColor: MColors.bgDeep,
       body: SafeArea(child: Column(children: [
         _header(),
         _tabBar(),
         Expanded(child: switch (_tab) {
           0 => _foodTab(),
           1 => _equipTab(),
-          2 => _recruitTab(),
           _ => _servicesTab(),
         }),
         _bottomBar(),
@@ -48,27 +48,23 @@ class _TraderScreenState extends State<TraderScreen> {
 
   // ── Nagłówek ─────────────────────────────────────────────────────────────
   Widget _header() => Container(
-    padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+    padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
     decoration: const BoxDecoration(
-      border: Border(bottom: BorderSide(color: MColors.gold, width: 1))),
-    child: Row(children: [
+      color: MColors.topBar,
+      border: Border(bottom: BorderSide(color: MColors.border, width: 1))),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
       GestureDetector(
         onTap: () => Navigator.pop(context),
-        child: const Icon(Icons.arrow_back, color: MColors.cream, size: 22)),
-      const SizedBox(width: 10),
+        child: Text('‹', style: MFonts.display(const TextStyle(
+            color: MColors.parchment, fontSize: 28, height: 1)))),
+      const SizedBox(width: 12),
       Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-        Text('🏪 Handlarz', style: const TextStyle(color: MColors.cream,
-            fontSize: 16, fontWeight: FontWeight.bold)),
-        Text('${s.type.emoji} ${s.name}',
-            style: const TextStyle(color: MColors.muted, fontSize: 11)),
+        Text('Handlarz', style: MText.title),
+        const SizedBox(height: 2),
+        Text('${s.name.toUpperCase()} · ${c.gold} ZŁOTA',
+            style: MText.subtitle),
       ])),
-      Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-        Text('🪙 ${c.gold}', style: const TextStyle(color: MColors.gold,
-            fontSize: 16, fontWeight: FontWeight.bold)),
-        Text('Dzień ${c.day}',
-            style: const TextStyle(color: MColors.muted, fontSize: 10)),
-      ]),
     ]),
   );
 
@@ -78,8 +74,6 @@ class _TraderScreenState extends State<TraderScreen> {
       _tabBtn(0, '🍞 Jedzenie'),
       const SizedBox(width: 6),
       _tabBtn(1, '⚒ Ekwipunek'),
-      const SizedBox(width: 6),
-      _tabBtn(2, '🧑‍🌾 Werbunek'),
       if (isCity) ...[
         const SizedBox(width: 6),
         _tabBtn(3, '🔥 Usługi'),
@@ -99,7 +93,7 @@ class _TraderScreenState extends State<TraderScreen> {
           border: Border.all(
               color: active ? MColors.gold : MColors.borderDim,
               width: active ? 1.5 : 0.5),
-          borderRadius: BorderRadius.circular(6)),
+          borderRadius: BorderRadius.circular(0)),
         child: Text(label, style: TextStyle(
             color: active ? MColors.gold : MColors.muted,
             fontSize: 11, fontWeight: active ? FontWeight.bold : null)),
@@ -124,16 +118,19 @@ class _TraderScreenState extends State<TraderScreen> {
         ...available.map((ft) {
           final shopHas = c.shopFoodAvail(s, ft);
           final myStock = c.foodUnits(ft);
+          final canAfford1 = c.gold >= ft.costPerUnit;
           return _shopCard(
             emoji: ft.emoji,
             title: ft.plName,
-            subtitle: '${ft.costPerUnit}🪙/jedn. · ${ft.plDesc}',
-            stockLine: 'Masz: $myStock · w sklepie: $shopHas',
+            subtitle: '${ft.costPerUnit}🪙/szt. · ${ft.plDesc}',
+            stockLine: c.freeFoodLeft > 0
+                ? 'Masz: $myStock szt. · 🎁 ${c.freeFoodLeft} sztuk GRATIS'
+                : 'Masz: $myStock szt. · w sklepie: $shopHas',
             buttons: [
-              ('+1 dzień', daily,
-                  c.gold >= ft.costPerUnit * daily && shopHas >= daily),
-              ('+5 dni', daily * 5,
-                  c.gold >= ft.costPerUnit * daily * 5 && shopHas >= daily * 5),
+              // Kupujemy SZTUKI (1 sztuka = 1 jednostka jedzenia = 10 ludzi/dzień)
+              ('+1', 1, shopHas >= 1 && canAfford1),
+              ('+5', 5, shopHas >= 1 && canAfford1),
+              ('+10', 10, shopHas >= 1 && canAfford1),
             ],
             onBuy: (qty) { c.buyFoodFrom(s, ft, qty); _refresh(); },
           );
@@ -158,8 +155,8 @@ class _TraderScreenState extends State<TraderScreen> {
           padding: const EdgeInsets.all(9),
           decoration: BoxDecoration(
             color: MColors.panelBg,
-            border: Border.all(color: MColors.borderDim),
-            borderRadius: BorderRadius.circular(6)),
+            border: Border.all(color: MColors.border),
+            borderRadius: BorderRadius.circular(0)),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('TWÓJ MAGAZYN', style: TextStyle(
                 color: MColors.muted, fontSize: 9, letterSpacing: 1)),
@@ -189,7 +186,7 @@ class _TraderScreenState extends State<TraderScreen> {
                        'w sklepie: $shopHas',
             buttons: [
               ('+1', 1, c.gold >= eq.cost && shopHas >= 1),
-              ('+5', 5, c.gold >= eq.cost * 5 && shopHas >= 5),
+              ('+5', 5, c.gold >= eq.cost && shopHas >= 1),
             ],
             onBuy: (qty) { c.buyEquipmentFrom(s, eq, qty); _refresh(); },
           );
@@ -200,48 +197,7 @@ class _TraderScreenState extends State<TraderScreen> {
     );
   }
 
-  // ── Zakładka: rekrutacja ─────────────────────────────────────────────────
-  Widget _recruitTab() {
-    final offered = isCity
-        ? [UnitType.infantry, UnitType.archers]
-        : [UnitType.peasant];
-    final available = offered.where((ut) =>
-        s.recruitsAvailable(ut, c.day) > 0).toList();
 
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-      children: [
-        _infoBar(isCity
-            ? 'Miasto: wyszkoleni żołnierze'
-            : 'Wioska: chłopi z widłami (słabi, ale tani)',
-            MColors.muted),
-        const SizedBox(height: 10),
-        if (available.isEmpty)
-          _emptyNote('Nikt nie chce się dziś zaciągnąć.'),
-        ...available.map((ut) {
-          const tier = TroopTier.recruit;
-          final cost = ut.baseCost > 0 ? ut.baseCost : tier.recruitCost;
-          final shopHas = c.shopRecruitAvail(s, ut);
-          return _shopCard(
-            emoji: ut.emoji,
-            title: '${ut.plName} · ${tier.plName}',
-            subtitle: 'Żołd ${tier.dailyWage}🪙/dzień',
-            stockLine: '$cost🪙 · dostępnych: $shopHas',
-            buttons: [
-              ('+1', 1, c.gold >= cost && shopHas >= 1),
-              ('+5', 5, c.gold >= cost * 5 && shopHas >= 5),
-            ],
-            onBuy: (qty) {
-              c.recruitTroopsFrom(s, ut, tier, qty); _refresh();
-            },
-          );
-        }),
-        const SizedBox(height: 10),
-        _emptyNote('Rekruci trafiają do rezerwy — przydziel ich '
-                   'do plutonów w Kompanii (🏕)'),
-      ],
-    );
-  }
 
   // ── Zakładka: usługi przetwórcze (tylko miasta) ──────────────────────────
   Widget _servicesTab() {
@@ -263,8 +219,8 @@ class _TraderScreenState extends State<TraderScreen> {
           padding: const EdgeInsets.all(11),
           decoration: BoxDecoration(
             color: MColors.panelBg,
-            border: Border.all(color: MColors.borderDim),
-            borderRadius: BorderRadius.circular(7)),
+            border: Border.all(color: MColors.border),
+            borderRadius: BorderRadius.circular(0)),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
               const Text('🔥', style: TextStyle(fontSize: 22)),
@@ -302,8 +258,8 @@ class _TraderScreenState extends State<TraderScreen> {
           padding: const EdgeInsets.all(11),
           decoration: BoxDecoration(
             color: MColors.panelBg,
-            border: Border.all(color: MColors.borderDim),
-            borderRadius: BorderRadius.circular(7)),
+            border: Border.all(color: MColors.border),
+            borderRadius: BorderRadius.circular(0)),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
               const Text('🥾', style: TextStyle(fontSize: 22)),
@@ -361,8 +317,8 @@ class _TraderScreenState extends State<TraderScreen> {
     padding: const EdgeInsets.all(11),
     decoration: BoxDecoration(
       color: MColors.panelBg,
-      border: Border.all(color: MColors.borderDim),
-      borderRadius: BorderRadius.circular(7)),
+      border: Border.all(color: MColors.border),
+      borderRadius: BorderRadius.circular(0)),
     child: Row(children: [
       Text(emoji, style: const TextStyle(fontSize: 24)),
       const SizedBox(width: 11),
@@ -393,7 +349,7 @@ class _TraderScreenState extends State<TraderScreen> {
                            : Colors.transparent,
             border: Border.all(
                 color: enabled ? MColors.green : MColors.borderDim),
-            borderRadius: BorderRadius.circular(5)),
+            borderRadius: BorderRadius.circular(0)),
           child: Text(label, style: TextStyle(
               color: enabled ? MColors.green : MColors.muted,
               fontSize: 11, fontWeight: FontWeight.bold)),
@@ -404,7 +360,7 @@ class _TraderScreenState extends State<TraderScreen> {
     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
     decoration: BoxDecoration(
       color: color.withValues(alpha: 0.08),
-      borderRadius: BorderRadius.circular(5)),
+      borderRadius: BorderRadius.circular(0)),
     child: Text(text, style: TextStyle(color: color, fontSize: 11)),
   );
 
@@ -429,7 +385,7 @@ class _TraderScreenState extends State<TraderScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
           decoration: BoxDecoration(
             border: Border.all(color: MColors.gold),
-            borderRadius: BorderRadius.circular(6)),
+            borderRadius: BorderRadius.circular(0)),
           child: const Text('Wyjdź', style: TextStyle(
               color: MColors.gold, fontSize: 13, fontWeight: FontWeight.bold)),
         ),

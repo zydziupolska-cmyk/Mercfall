@@ -5,8 +5,11 @@ import '../engine/army.dart';
 import '../engine/bandits.dart';
 import '../engine/campaign_state.dart';
 import '../engine/contracts.dart';
+import '../engine/perks.dart';
 import '../engine/factions.dart';
 import '../engine/food.dart';
+import '../engine/audio.dart';
+import '../engine/tutorial.dart';
 import '../engine/raids.dart';
 import '../engine/settlement.dart';
 import '../engine/siege.dart';
@@ -29,7 +32,7 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController _ticker;
   double _lastTime = 0;
   final Random _rng = Random();
@@ -45,6 +48,10 @@ class _MapScreenState extends State<MapScreen>
   double  _ptrCamX = 0, _ptrCamY = 0; // kamera w momencie dotknięcia
   bool    _ptrDragged = false;  // czy to było przesunięcie
   static const double _tapThreshold = 12.0;
+  /// Aktywne wskaźniki na ekranie (dla gestu szczypania dwoma palcami).
+  final Map<int, Offset> _pointers = {};
+  double _pinchStartDist = 0;
+  double _pinchStartScale = 1.0;
 
   Settlement? _selectedSettlement;
   /// Zlecenia ukończone w tej klatce — pokazywane po zakończeniu builda.
@@ -60,7 +67,8 @@ class _MapScreenState extends State<MapScreen>
   @override
   void initState() {
     super.initState();
-    // Kamera zostanie sclampowana po pierwszym layoutcie (gdy znamy _viewSize)
+    WidgetsBinding.instance.addObserver(this);
+    MusicManager.instance.play(MusicTrack.map); // muzyka świata
     _camX = map.partyX;
     _camY = map.partyY;
 
@@ -71,7 +79,16 @@ class _MapScreenState extends State<MapScreen>
       ..addListener(_onTick)
       ..forward();
 
-    // Napad z offline
+    // Autozapis co 20 sekund + wskaźnik dyskietki
+    _autoSave = Timer.periodic(const Duration(seconds: 20), (_) async {
+      await c.save();
+      if (!mounted) return;
+      setState(() => _saving = true);
+      Timer(const Duration(milliseconds: 1400), () {
+        if (mounted) setState(() => _saving = false);
+      });
+    });
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final raid = c.bandits.pendingRaid;
       if (raid == null) return;
@@ -82,6 +99,18 @@ class _MapScreenState extends State<MapScreen>
       }
     });
   }
+
+  Timer? _autoSave;
+  bool _saving = false;
+  /// Bandyta którego aktywnie ścigamy (żywy cel — pozycja aktualizowana co tick).
+  BanditParty? _chaseTarget;
+  double _chaseRetarget = 0;
+  /// Zlecenie obszarowe którego cel właśnie odkryto (do komunikatu).
+  Contract? _pendingReveal;
+  /// List gończy w trakcie realizacji (walka z hersztem).
+  Contract? _pendingBounty;
+  /// Pobór podatków w trakcie (walka z wartą wioski).
+  Contract? _pendingTax;
 
   void _catchUpOfflineTime() {
     final last = map.lastMoveTick;
@@ -121,15 +150,79 @@ class _MapScreenState extends State<MapScreen>
 
     setState(() {
       map.armySizeSpeedMult = WorldMap.speedMultForArmy(c.partyStrength);
+
+      // Ścigamy bandę? Aktualizuj cel na jej BIEŻĄCĄ pozycję.
+      if (_chaseTarget != null) {
+        final b = _chaseTarget!;
+        // Banda zniknęła (rozbita/uciekła z mapy) → przerwij pościg
+        if (!c.bandits.parties.contains(b)) {
+          _chaseTarget = null;
+          map.chasing = false;
+          map.stop();
+        } else {
+          final d = b.distanceTo(map.partyX, map.partyY);
+          if (d < 45) {
+            // Dogoniliśmy — rozpocznij walkę
+            final target = b;
+            _chaseTarget = null;
+            map.chasing = false;
+            map.stop();
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _attackBandits(target);
+            });
+          } else {
+            // Przelicz trasę do nowej pozycji co ~0.4s (nie co klatkę)
+            _chaseRetarget += dt;
+            if (_chaseRetarget > 0.4) {
+              _chaseRetarget = 0;
+              map.setDestination(b.x, b.y);
+            }
+          }
+        }
+      }
+
       final reached = map.advance(dt);
-      if (reached.isNotEmpty) {
+      // Podczas pościgu NIE zatrzymuj się w osadach — bandyta jest ważniejszy.
+      if (reached.isNotEmpty && _chaseTarget == null) {
         _selectedSettlement = reached.first;
+        c.tutorialEnteredSettlement(); // samouczek krok 1
         final done = c.reportArrival(reached.first);
         if (done.isNotEmpty) {
           _pendingContractToast = done;
         }
         final blocked = c.consumeBlockedDelivery();
         if (blocked != null) _pendingBlockedDelivery = blocked;
+        // Pobór podatków — dotarłeś do wioski-celu
+        if (_pendingTax == null) {
+          final taxFight = c.checkTaxCollection(reached.first.id);
+          if (taxFight != null) {
+            _pendingTax = taxFight;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _startTaxBattle(taxFight, reached.first);
+            });
+          }
+        }
+      }
+
+      // Zlecenia obszarowe: odkryj cel przy zbliżeniu, ukończ przy dotarciu
+      final revealed = c.checkAreaReveal(map.partyX, map.partyY);
+      if (revealed.isNotEmpty) {
+        _pendingReveal = revealed.first;
+      }
+      final areaDone = c.checkAreaArrival(map.partyX, map.partyY);
+      if (areaDone.isNotEmpty) {
+        _pendingContractToast = areaDone;
+      }
+      // List gończy — dotarłeś do herszta, rozpocznij walkę
+      if (_pendingBounty == null) {
+        final bounty = c.bountyBattleReady(map.partyX, map.partyY);
+        if (bounty != null) {
+          _pendingBounty = bounty;
+          map.stop();
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _startBountyBattle(bounty);
+          });
+        }
       }
 
       // Bandyci NIE atakują gdy stoisz w mieście/wiosce (straże),
@@ -176,7 +269,80 @@ class _MapScreenState extends State<MapScreen>
       });
     }
 
-    if (map.isMoving && (now.floor() % 3 == 0)) c.save();
+    final reveal = _pendingReveal;
+    if (reveal != null) {
+      _pendingReveal = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(reveal.kind == ContractKind.findCaravan
+              ? '🐫 Karawana odnaleziona! Dotrzyj do niej.'
+              : '💀 ${reveal.targetName} wytropiony! Rozbij jego bandę.'),
+          backgroundColor: MColors.gold,
+          duration: const Duration(seconds: 3)));
+      });
+    }
+
+    if (map.isMoving && (now.floor() % 3 == 0)) c.saveNow();
+
+    // Gdy wróciliśmy na mapę (np. z bitwy) i gra inna muzyka — przywróć mapową.
+    // ModalRoute.isCurrent = mapa jest na wierzchu stosu.
+    if (MusicManager.instance.current != MusicTrack.map &&
+        (ModalRoute.of(context)?.isCurrent ?? false)) {
+      MusicManager.instance.play(MusicTrack.map);
+    }
+
+    // Powiadomienie o zdobytym perku
+    final perk = c.consumeUnlockedPerk();
+    if (perk != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _showPerkUnlocked(perk);
+      });
+    }
+
+    // Powiadomienie o ukończonym kroku samouczka
+    final tutStep = c.consumeCompletedStep();
+    if (tutStep != null && tutStep != TutorialStep.done) {
+      final reward = tutStep.goldReward;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(reward > 0
+              ? '✓ Zadanie ukończone! +$reward złota'
+              : '✓ Zadanie ukończone!'),
+          backgroundColor: MColors.green,
+          duration: const Duration(milliseconds: 1800)));
+      });
+    }
+  }
+
+  void _showPerkUnlocked(CompanyPerk perk) {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      backgroundColor: MColors.panelBg,
+      shape: const RoundedRectangleBorder(
+        side: BorderSide(color: MColors.gold, width: 2)),
+      title: Row(children: [
+        Text(perk.emoji, style: const TextStyle(fontSize: 24)),
+        const SizedBox(width: 10),
+        Expanded(child: Text('PERK ZDOBYTY', style: MFonts.label(
+            const TextStyle(color: MColors.goldBright, fontSize: 15,
+                letterSpacing: 2)))),
+      ]),
+      content: Column(mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(perk.plName, style: MFonts.display(const TextStyle(
+            color: MColors.cream, fontSize: 22))),
+        const SizedBox(height: 8),
+        Text(perk.effect, style: MFonts.body(const TextStyle(
+            color: MColors.parchment, fontSize: 13))),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx),
+            child: Text('ŚWIETNIE', style: MFonts.label(const TextStyle(
+                color: MColors.gold, letterSpacing: 1.5)))),
+      ],
+    ));
   }
 
   /// Dynamiczny min. zoom: nie oddalaj bardziej niż widać cały świat.
@@ -226,13 +392,39 @@ class _MapScreenState extends State<MapScreen>
   // Zoom: przyciski ＋／－
 
   void _onPtrDown(PointerDownEvent e) {
-    _ptrDown     = e.localPosition;
-    _ptrCamX     = _camX;
-    _ptrCamY     = _camY;
-    _ptrDragged  = false;
+    _pointers[e.pointer] = e.localPosition;
+    if (_pointers.length == 2) {
+      // Start gestu szczypania
+      final pts = _pointers.values.toList();
+      _pinchStartDist = (pts[0] - pts[1]).distance;
+      _pinchStartScale = _scale;
+      _ptrDragged = true; // blokuj tap
+    } else {
+      _ptrDown     = e.localPosition;
+      _ptrCamX     = _camX;
+      _ptrCamY     = _camY;
+      _ptrDragged  = false;
+    }
   }
 
   void _onPtrMove(PointerMoveEvent e) {
+    if (_pointers.containsKey(e.pointer)) {
+      _pointers[e.pointer] = e.localPosition;
+    }
+    // Szczypanie dwoma palcami → zoom
+    if (_pointers.length == 2 && _pinchStartDist > 0) {
+      final pts = _pointers.values.toList();
+      final dist = (pts[0] - pts[1]).distance;
+      if (dist > 0) {
+        setState(() {
+          _scale = (_pinchStartScale * dist / _pinchStartDist)
+              .clamp(_minScale(), _maxScale);
+          _clampCamera();
+        });
+      }
+      return;
+    }
+    // Pojedynczy palec → przesuwanie kamery
     if (_ptrDown == null) return;
     final dx = e.localPosition.dx - _ptrDown!.dx;
     final dy = e.localPosition.dy - _ptrDown!.dy;
@@ -249,14 +441,25 @@ class _MapScreenState extends State<MapScreen>
   }
 
   void _onPtrUp(PointerUpEvent e) {
-    if (_ptrDown != null && !_ptrDragged) {
-      _onTap(_ptrDown!); // wyraźny tap — wyślij oddział
+    final wasPinching = _pointers.length == 2;
+    _pointers.remove(e.pointer);
+    if (wasPinching) {
+      _pinchStartDist = 0;
+      // Po szczypaniu nie traktuj jako tap
+      _ptrDown = null;
+      return;
+    }
+    if (_ptrDown != null && !_ptrDragged && _pointers.isEmpty) {
+      _onTap(_ptrDown!); // wyraźny tap
     }
     _ptrDown    = null;
     _ptrDragged = false;
   }
 
   void _onTap(Offset screenPos) {
+    // Nowy tap przerywa pościg (chyba że klikamy na tę samą bandę)
+    _chaseTarget = null;
+    map.chasing = false;
     // Znajdź NAJBLIŻSZĄ osadę i sprawdź czy klik był w jej ikonę (~18px + zapas).
     Settlement? nearest;
     double nearestDist = double.infinity;
@@ -277,11 +480,9 @@ class _MapScreenState extends State<MapScreen>
 
     if (nearest != null && nearestDist < 24) {
       final s = nearest;
+      // Klik na osadę tylko ją ZAZNACZA — podróż dopiero przez "Wyrusz tutaj".
       setState(() => _selectedSettlement =
           _selectedSettlement?.id == s.id ? null : s);
-      if (map.settlementHere?.id != s.id) {
-        map.setDestination(s.x, s.y);
-      }
       return;
     }
 
@@ -301,13 +502,38 @@ class _MapScreenState extends State<MapScreen>
   }
 
   @override
-  void dispose() { _ticker.dispose(); super.dispose(); }
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
+      c.save();
+      MusicManager.instance.pause();
+    } else if (state == AppLifecycleState.resumed) {
+      MusicManager.instance.resume();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _autoSave?.cancel();
+    c.save(); // zapisz stan przy opuszczaniu mapy (np. powrót do menu)
+    _ticker.dispose();
+    super.dispose();
+  }
 
   // ── Build ────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: MColors.bg,
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        await _confirmExitToMenu();
+      },
+      child: Scaffold(
+      backgroundColor: MColors.bgDeep,
       body: SafeArea(child: Stack(children: [
         Column(children: [
         _topBar(),
@@ -324,6 +550,10 @@ class _MapScreenState extends State<MapScreen>
               onPointerDown: _onPtrDown,
               onPointerMove: _onPtrMove,
               onPointerUp:   _onPtrUp,
+              onPointerCancel: (e) {
+                _pointers.remove(e.pointer);
+                _ptrDown = null; _ptrDragged = false; _pinchStartDist = 0;
+              },
               child: CustomPaint(
                 painter: _WorldPainter(
                   map: map, bandits: c.bandits,
@@ -332,14 +562,17 @@ class _MapScreenState extends State<MapScreen>
                   ownedIds: c.ownedSettlements.map((o) => o.settlementId).toSet(),
                   threatenedIds:
                       c.raids.active.map((r) => r.settlementId).toSet(),
+                  searchAreas: c.takenContracts
+                      .where((ct) => ct.hasSearchArea)
+                      .toList(),
                 ),
                 size: _viewSize,
               ),
             )),          // zamknięcie Listener + ClipRect
-            // Przyciski zoom (prawy dolny róg)
+            // Przyciski zoom (prawy dolny róg, nad paskiem nawigacji)
             Positioned(
               right: 8,
-              bottom: _selectedSettlement != null ? 120 : 8,
+              bottom: _selectedSettlement != null ? 132 : 76,
               child: Column(children: [
                 _zoomBtn('＋', () => setState(() =>
                     _scale = (_scale * 1.35).clamp(_minScale(), _maxScale))),
@@ -356,7 +589,7 @@ class _MapScreenState extends State<MapScreen>
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
                     color: MColors.panelBg.withValues(alpha: 0.88),
-                    borderRadius: BorderRadius.circular(5)),
+                    borderRadius: BorderRadius.circular(0)),
                   child: const Text('🐎 W ruchu…',
                       style: TextStyle(color: MColors.gold, fontSize: 11)),
                 ),
@@ -365,9 +598,129 @@ class _MapScreenState extends State<MapScreen>
         })),
         if (_selectedSettlement != null) _settlementPanel(_selectedSettlement!),
         ]),
+        if (_selectedSettlement == null) Positioned(
+          left: 0, right: 0, bottom: 0, child: _bottomNav()),
+        // Baner samouczka (pierwsze zadania)
+        if (c.tutorialActive && _selectedSettlement == null)
+          Positioned(left: 12, right: 12, top: 8, child: _tutorialBanner()),
       ])),
+    ));
+  }
+
+  Widget _tutorialBanner() {
+    final step = c.tutorialStep;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      decoration: BoxDecoration(
+        color: MColors.panelBg.withValues(alpha: 0.94),
+        border: Border.all(color: MColors.gold.withValues(alpha: 0.6)),
+      ),
+      child: Row(children: [
+        Transform.rotate(angle: 0.785, child: Container(
+            width: 8, height: 8, color: MColors.goldBright)),
+        const SizedBox(width: 10),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+          Text('ZADANIE', style: MFonts.label(const TextStyle(
+              fontSize: 9, color: MColors.dim, letterSpacing: 2))),
+          const SizedBox(height: 1),
+          Text(step.task, style: MFonts.label(const TextStyle(
+              fontSize: 13, color: MColors.cream, letterSpacing: 0.3))),
+          const SizedBox(height: 2),
+          Text(step.hint, style: MFonts.body(const TextStyle(
+              fontSize: 10, color: MColors.muted, height: 1.2))),
+        ])),
+      ]),
     );
   }
+
+  /// Wyjście do menu — zapisz stan i potwierdź.
+  Future<void> _confirmExitToMenu() async {
+    // Najpierw spróbuj zapisać
+    await c.save();
+    if (!mounted) return;
+    final saved = !c.hasUnsavedChanges;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: MColors.panelBg,
+        shape: const RoundedRectangleBorder(
+          side: BorderSide(color: MColors.gold, width: 1.5)),
+        title: Text(saved ? 'ZAPISANO' : 'GRA NIEZAPISANA',
+            style: MFonts.label(TextStyle(
+                color: saved ? MColors.greenBright : MColors.ember,
+                fontSize: 15, letterSpacing: 1.4))),
+        content: Text(
+            saved
+                ? 'Postęp zapisany. Wrócić do menu?'
+                : 'Nie udało się zapisać gry. Wyjście teraz oznacza '
+                  'utratę postępu. Spróbować zapisać ponownie?',
+            style: MFonts.body(const TextStyle(
+                color: MColors.bone, fontSize: 13, height: 1.4))),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'stay'),
+            child: Text('ZOSTAŃ', style: MFonts.label(const TextStyle(
+                color: MColors.muted, letterSpacing: 1.2)))),
+          if (!saved)
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'retry'),
+              child: Text('ZAPISZ PONOWNIE', style: MFonts.label(
+                  const TextStyle(color: MColors.gold, letterSpacing: 1.2)))),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'exit'),
+            child: Text(saved ? 'DO MENU' : 'WYJDŹ BEZ ZAPISU',
+                style: MFonts.label(TextStyle(
+                    color: saved ? MColors.greenBright : MColors.ember,
+                    letterSpacing: 1.2)))),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'retry') {
+      await c.save();
+      if (mounted) await _confirmExitToMenu(); // pokaż ponownie z nowym stanem
+    } else if (action == 'exit') {
+      if (mounted) Navigator.of(context).pop(); // wróć do menu
+    }
+    // 'stay' lub null → nic, zostań w grze
+  }
+
+  /// Dolny pasek nawigacji w stylu prototypu — romb + rozstrzelona etykieta.
+  Widget _bottomNav() => Container(
+    decoration: const BoxDecoration(
+      color: MColors.topBar,
+      border: Border(top: BorderSide(color: MColors.border, width: 1))),
+    child: SafeArea(top: false, child: Row(children: [
+      _navItem('MAPA', true, () {}),
+      _navItem('KOMPANIA', false, () async {
+        await Navigator.push(context, MaterialPageRoute(
+            builder: (_) => ArmyScreen(campaign: c)));
+        setState(() {});
+      }),
+      _navItem('KRÓLESTWA', false, _showFactions),
+      _navItem('SŁAWA ${c.reputation}', false, _showReputation),
+    ])),
+  );
+
+  Widget _navItem(String label, bool active, VoidCallback onTap) =>
+      Expanded(child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Transform.rotate(angle: 0.785, child: Container(
+                width: 5, height: 5,
+                color: active ? MColors.ember : MColors.borderWarm)),
+            const SizedBox(height: 6),
+            Text(label, style: MFonts.label(TextStyle(
+                fontSize: 11,
+                color: active ? MColors.emberBright : MColors.dim,
+                letterSpacing: 1.6))),
+          ]),
+        ),
+      ));
 
   Widget _zoomBtn(String label, VoidCallback onTap) => GestureDetector(
     onTap: onTap,
@@ -376,116 +729,129 @@ class _MapScreenState extends State<MapScreen>
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: MColors.panelBg.withValues(alpha: 0.90),
-        border: Border.all(color: MColors.gold.withValues(alpha: 0.5)),
-        borderRadius: BorderRadius.circular(6)),
+        border: Border.all(color: MColors.borderGold),
+        borderRadius: BorderRadius.circular(0)),
       child: Text(label, style: const TextStyle(
           color: MColors.gold, fontSize: 18, fontWeight: FontWeight.bold)),
     ),
   );
 
-  Widget _topBar() => Container(
-    padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
-    decoration: const BoxDecoration(
-      border: Border(bottom: BorderSide(color: MColors.gold, width: 1))),
-    child: Row(children: [
-      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-        Text(map.settlementHere != null
-            ? '${map.settlementHere!.type.emoji} ${map.settlementHere!.name}'
-            : (map.isMoving ? '🐎 W drodze…' : '🗺 Pustkowie'),
-            style: const TextStyle(color: MColors.cream, fontSize: 14,
-                fontWeight: FontWeight.bold)),
-        Text('Dzień ${c.day}', style: const TextStyle(
-            color: MColors.muted, fontSize: 10)),
-      ])),
-      _statChip('⚔ ${c.campaignMorale.round()}',
-          c.campaignMorale > 60 ? MColors.green : MColors.red),
-      const SizedBox(width: 6),
-      _statChip('🍞 ${c.daysOfFood}d',
-          c.daysOfFood > 2 ? MColors.cream : MColors.red),
-      const SizedBox(width: 6),
-      _statChip('⭐ ${c.reputation}', MColors.gold),
-      const SizedBox(width: 6),
-      _statChip('🪙 ${c.gold}', MColors.gold),
-      const SizedBox(width: 8),
-      GestureDetector(
-        onTap: () => _showFactions(),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          margin: const EdgeInsets.only(right: 6),
-          decoration: BoxDecoration(
-            border: Border.all(color: c.allegiance == Faction.none
-                ? MColors.borderDim
-                : Color(c.allegiance.color)),
-            borderRadius: BorderRadius.circular(6)),
-          child: Text(c.allegiance == Faction.none
-              ? '🏳' : c.allegiance.emoji,
-              style: const TextStyle(fontSize: 15)),
-        ),
-      ),
-      GestureDetector(
-        onTap: () async {
-          await Navigator.push(context, MaterialPageRoute(
-              builder: (_) => ArmyScreen(campaign: c)));
-          setState(() {});
-        },
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            border: Border.all(color: MColors.gold.withValues(alpha: 0.6)),
-            borderRadius: BorderRadius.circular(6)),
-          child: const Text('🏕', style: TextStyle(fontSize: 16)),
-        ),
-      ),
-    ]),
-  );
+  Widget _topBar() {
+    final moralePct = (c.campaignMorale.clamp(0, 100)) / 100.0;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+      decoration: const BoxDecoration(
+        color: MColors.topBar,
+        border: Border(bottom: BorderSide(color: MColors.border, width: 1))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Linia 1: marka + rozdział + dzień
+        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+          Text('Mercfall', style: MText.brand),
+          const SizedBox(width: 9),
+          Expanded(child: Text(c.chapter.plName.toUpperCase(),
+              style: MText.subtitle)),
+          // Wskaźnik aktywnych zleceń — klik otwiera listę
+          if (c.takenContracts.isNotEmpty) ...[
+            GestureDetector(
+              onTap: _showActiveContracts,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Text('📜', style: TextStyle(fontSize: 13)),
+                  const SizedBox(width: 3),
+                  Text('${c.takenContracts.length}',
+                      style: MFonts.label(const TextStyle(
+                          fontSize: 13, color: MColors.goldBright))),
+                ]),
+              ),
+            ),
+          ],
+          Text('DZIEŃ ${c.day}', style: MFonts.label(const TextStyle(
+              fontSize: 12, color: MColors.faint, letterSpacing: 1.4))),
+          if (_saving) ...[
+            const SizedBox(width: 8),
+            _SaveIcon(),
+          ],
+        ]),
+        const SizedBox(height: 9),
+        // Linia 2: statystyki z rombami + morale
+        Row(children: [
+          _stat(MColors.gold, '${c.gold}', 'ZŁ'),
+          const SizedBox(width: 14),
+          _stat(MColors.factGreen, '${c.daysOfFood}', 'DNI'),
+          const SizedBox(width: 14),
+          _stat(MColors.red, '${c.army.totalActive}', 'LUDZI'),
+          const Spacer(),
+          Text('MORALE', style: MFonts.label(const TextStyle(
+              fontSize: 11, color: MColors.dim, letterSpacing: 1.0))),
+          const SizedBox(width: 6),
+          Container(
+            width: 44, height: 4, color: MColors.border,
+            child: FractionallySizedBox(
+              alignment: Alignment.centerLeft,
+              widthFactor: moralePct,
+              child: Container(color: c.campaignMorale > 40
+                  ? MColors.red : MColors.ember),
+            ),
+          ),
+        ]),
+      ]),
+    );
+  }
 
-  Widget _statChip(String label, Color color) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-    decoration: BoxDecoration(
-      color: color.withValues(alpha: 0.12),
-      borderRadius: BorderRadius.circular(5)),
-    child: Text(label, style: TextStyle(color: color, fontSize: 11,
-        fontWeight: FontWeight.bold)),
-  );
+  /// Statystyka: romb + liczba + etykieta (styl prototypu).
+  Widget _stat(Color dotColor, String value, String label) => Row(
+    mainAxisSize: MainAxisSize.min, children: [
+      Transform.rotate(angle: 0.785,
+        child: Container(width: 6, height: 6, color: dotColor)),
+      const SizedBox(width: 5),
+      Text(value, style: MFonts.label(const TextStyle(
+          fontSize: 15, color: MColors.bone))),
+      const SizedBox(width: 3),
+      Text(label, style: MFonts.label(const TextStyle(
+          fontSize: 11, color: MColors.dim))),
+    ]);
 
   // ── Panel osady ──────────────────────────────────────────────────────────
   Widget _settlementPanel(Settlement s) {
     final here = map.settlementHere?.id == s.id;
+    final owned = c.ownsSettlement(s.id);
     final dist = s.distanceTo(map.partyX, map.partyY);
     final etaSec = (dist / (WorldMap.baseSpeed * _scale.clamp(0.1, 1))).round();
 
+    final subParts = <String>[
+      if (owned) 'Twoja ziemia'
+      else if (s.faction != Faction.none) s.faction.plName,
+      s.isCapital ? 'Stolica' : s.type.plName,
+      if (!here) '~${etaSec}s',
+    ];
     return Container(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 14),
-      decoration: BoxDecoration(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+      decoration: const BoxDecoration(
         color: MColors.panelBg,
-        border: const Border(top: BorderSide(color: MColors.gold, width: 1))),
+        border: Border(top: BorderSide(color: MColors.borderWarm, width: 1))),
       child: SafeArea(top: false, child: Column(mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Text(s.type.emoji, style: const TextStyle(fontSize: 20)),
-          const SizedBox(width: 8),
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          if (owned || s.faction != Faction.none) ...[
+            Padding(padding: const EdgeInsets.only(top: 6),
+              child: Transform.rotate(angle: 0.785, child: Container(
+                width: 8, height: 8,
+                color: owned ? MColors.playerLand : Color(s.faction.color)))),
+            const SizedBox(width: 10),
+          ],
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-            Text(s.name, style: const TextStyle(color: MColors.cream,
-                fontSize: 14, fontWeight: FontWeight.bold)),
-            Row(children: [
-              if (s.faction != Faction.none) ...[
-                Text('${s.faction.emoji} ${s.faction.plName}',
-                    style: TextStyle(color: Color(s.faction.color),
-                        fontSize: 10, fontWeight: FontWeight.bold)),
-                const Text(' · ', style: TextStyle(
-                    color: MColors.muted, fontSize: 10)),
-              ],
-              Text(s.isCapital ? '👑 Stolica' : s.type.plName,
-                  style: const TextStyle(color: MColors.muted, fontSize: 10)),
-              if (!here) Text(' · ~${etaSec}s',
-                  style: const TextStyle(color: MColors.muted, fontSize: 10)),
-            ]),
+            Text(s.name, style: MText.title),
+            const SizedBox(height: 3),
+            Text(subParts.join(' · ').toUpperCase(),
+                style: MText.subtitle),
           ])),
           GestureDetector(
             onTap: () => setState(() => _selectedSettlement = null),
-            child: const Icon(Icons.close, color: MColors.muted, size: 20)),
+            child: Text('ZAMKNIJ', style: MFonts.label(const TextStyle(
+                fontSize: 12, color: MColors.dim, letterSpacing: 1.4)))),
         ]),
         const SizedBox(height: 10),
         if (here) Wrap(spacing: 8, runSpacing: 8, children: [
@@ -505,10 +871,8 @@ class _MapScreenState extends State<MapScreen>
                 SettlementType.banditCamp => '⚔ Szturm',
               },
               MColors.red, () => _startSiege(s)),
-          if (s.type.hasFood)
-            _actionBtn('🍞 Jedzenie', MColors.gold, () => _showFoodShop(s)),
-          if (s.type == SettlementType.city ||
-              s.type == SettlementType.village)
+          if ((s.type == SettlementType.city ||
+               s.type == SettlementType.village) && !c.ownsSettlement(s.id))
             _actionBtn('📜 Zlecenia', MColors.gold, () => _showContracts(s)),
           if (s.type.hasRecruitment && !c.ownsSettlement(s.id))
             _actionBtn('🧑‍🌾 Rekrutacja', MColors.green, () => _showRecruitShop(s)),
@@ -525,22 +889,56 @@ class _MapScreenState extends State<MapScreen>
         ]) else _actionBtn('🐎 Wyrusz tutaj', MColors.gold, () {
           setState(() { map.setDestination(s.x, s.y); _selectedSettlement = null; });
         }),
+        const SizedBox(height: 12),
+        // Pasek szybkiego dostępu: kompania, królestwa, reputacja
+        Container(
+          padding: const EdgeInsets.only(top: 12),
+          decoration: const BoxDecoration(
+            border: Border(top: BorderSide(color: MColors.borderDim))),
+          child: Row(children: [
+            _quickLink('KOMPANIA', () async {
+              await Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => ArmyScreen(campaign: c)));
+              setState(() {});
+            }),
+            const SizedBox(width: 16),
+            _quickLink('KRÓLESTWA', _showFactions),
+            const Spacer(),
+            Transform.rotate(angle: 0.785, child: Container(
+                width: 6, height: 6, color: MColors.gold)),
+            const SizedBox(width: 5),
+            Text('${c.reputation}', style: MFonts.label(const TextStyle(
+                fontSize: 15, color: MColors.bone))),
+            const SizedBox(width: 3),
+            Text('SŁAWA', style: MFonts.label(const TextStyle(
+                fontSize: 11, color: MColors.dim))),
+          ]),
+        ),
       ])),
     );
   }
 
-  Widget _actionBtn(String label, Color color, VoidCallback onTap) =>
-      GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-          decoration: BoxDecoration(
-            border: Border.all(color: color.withValues(alpha: 0.7)),
-            borderRadius: BorderRadius.circular(6)),
-          child: Text(label, style: TextStyle(color: color, fontSize: 12,
-              fontWeight: FontWeight.bold)),
-        ),
-      );
+  Widget _quickLink(String label, VoidCallback onTap) => GestureDetector(
+    onTap: onTap,
+    child: Text(label, style: MFonts.label(const TextStyle(
+        fontSize: 12, color: MColors.muted, letterSpacing: 1.4))),
+  );
+
+  Widget _actionBtn(String label, Color color, VoidCallback onTap) {
+    // Zdejmij ewentualny emoji z początku etykiety — design jest tekstowy
+    final clean = label.replaceAll(RegExp(r'^[^\w\sąćęłńóśźżĄĆĘŁŃÓŚŹŻ]+\s*'), '');
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.10),
+          border: Border.all(color: color.withValues(alpha: 0.55))),
+        child: Text(clean.toUpperCase(), style: MFonts.label(TextStyle(
+            color: color, fontSize: 12, letterSpacing: 1.4))),
+      ),
+    );
+  }
 
   // ── Napad ────────────────────────────────────────────────────────────────
   void _showRaidDialog(PendingRaid raid) {
@@ -583,7 +981,7 @@ class _MapScreenState extends State<MapScreen>
         return AlertDialog(
           backgroundColor: MColors.panelBg,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(0),
             side: const BorderSide(color: MColors.red, width: 2)),
           title: Row(children: [
             const Text('💀 ', style: TextStyle(fontSize: 20)),
@@ -679,7 +1077,8 @@ class _MapScreenState extends State<MapScreen>
     } else {
       Navigator.push(context, MaterialPageRoute(
           builder: (_) => PreBattleScreen(
-              campaign: c, localeNotifier: widget.localeNotifier)))
+              campaign: c, localeNotifier: widget.localeNotifier,
+              enemyStrength: raid.banditStrength)))
         .then((_) => setState(() {}));
     }
   }
@@ -720,7 +1119,7 @@ class _MapScreenState extends State<MapScreen>
       builder: (ctx) => AlertDialog(
         backgroundColor: MColors.panelBg,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(0),
           side: BorderSide(color: titleColor, width: 1.5)),
         title: Text(victory ? '⚔ Auto-walka: Wygrana' : '⚔ Auto-walka: Przegrana',
             style: TextStyle(color: titleColor, fontSize: 14,
@@ -780,7 +1179,7 @@ class _MapScreenState extends State<MapScreen>
       showDialog(context: context, builder: (ctx) => AlertDialog(
         backgroundColor: MColors.panelBg,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(0),
           side: BorderSide(color: Color(s.faction.color), width: 2)),
         title: Text('${s.faction.emoji} Stolica broniona',
             style: TextStyle(color: Color(s.faction.color), fontSize: 15,
@@ -835,7 +1234,7 @@ class _MapScreenState extends State<MapScreen>
       showDialog(context: context, builder: (ctx) => AlertDialog(
         backgroundColor: MColors.panelBg,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(0),
           side: const BorderSide(color: MColors.red, width: 1.5)),
         title: const Text('🏰 Brak machin oblężniczych',
             style: TextStyle(color: MColors.red, fontSize: 15,
@@ -858,7 +1257,7 @@ class _MapScreenState extends State<MapScreen>
     showDialog(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: MColors.panelBg,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(0),
         side: const BorderSide(color: MColors.red, width: 1.5)),
       title: Text('${scenario.emoji} ${scenario.plName}',
           style: const TextStyle(color: MColors.red, fontSize: 15,
@@ -898,8 +1297,23 @@ class _MapScreenState extends State<MapScreen>
                     campaign: c, localeNotifier: widget.localeNotifier,
                     scenario: scenario)));
             if (c.battlesWon > beforeWins) {
-              // Miasto/wioska → przejęcie
-              if (s.type == SettlementType.city ||
+              // Sabotaż / odbicie jeńców — zlecenie na tę osadę, BEZ przejęcia
+              final contractDone = c.reportBattleWonAt(s.id);
+              if (contractDone.isNotEmpty) {
+                if (mounted) _showContractDone(contractDone);
+                // Odbicie jeńców z ruin — szansa na machinę jak z obozu
+                if (contractDone.any((ct) =>
+                    ct.kind == ContractKind.rescueCaptives)) {
+                  final loot = c.rollSiegeLoot(_rng);
+                  if (loot != null && mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text('W kryjówce znaleziono: ${loot.plName}'),
+                      backgroundColor: MColors.gold));
+                  }
+                }
+              }
+              // Miasto/wioska → przejęcie (tylko jeśli NIE był to sabotaż)
+              else if (s.type == SettlementType.city ||
                   s.type == SettlementType.village) {
                 final owned = c.captureSettlement(s);
                 c.recordConquest(s);
@@ -912,7 +1326,7 @@ class _MapScreenState extends State<MapScreen>
                   showDialog(context: context, builder: (ctx) => AlertDialog(
                     backgroundColor: MColors.panelBg,
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(0),
                       side: const BorderSide(color: MColors.gold, width: 2)),
                     title: const Text('🎁 Rzadki łup!',
                         style: TextStyle(color: MColors.gold, fontSize: 16,
@@ -983,8 +1397,8 @@ class _MapScreenState extends State<MapScreen>
             Container(
               padding: const EdgeInsets.all(11),
               decoration: BoxDecoration(
-                border: Border.all(color: MColors.borderDim),
-                borderRadius: BorderRadius.circular(6)),
+                border: Border.all(color: MColors.border),
+                borderRadius: BorderRadius.circular(0)),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                 Row(children: [
@@ -1040,7 +1454,7 @@ class _MapScreenState extends State<MapScreen>
                            : Colors.transparent,
             border: Border.all(
                 color: enabled ? MColors.green : MColors.borderDim),
-            borderRadius: BorderRadius.circular(6)),
+            borderRadius: BorderRadius.circular(0)),
           child: Text(label, style: TextStyle(
               color: enabled ? MColors.green : MColors.muted,
               fontSize: 12, fontWeight: FontWeight.bold)),
@@ -1064,7 +1478,7 @@ class _MapScreenState extends State<MapScreen>
     showDialog(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: MColors.panelBg,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(0),
         side: const BorderSide(color: MColors.red, width: 1.5)),
       title: Row(children: [
         const Text('💀 ', style: TextStyle(fontSize: 20)),
@@ -1101,6 +1515,8 @@ class _MapScreenState extends State<MapScreen>
           ElevatedButton(
             onPressed: () {
               Navigator.pop(ctx);
+              _chaseTarget = b; // ścigaj żywy cel — pozycja aktualizuje się co tick
+              map.chasing = true;
               map.setDestination(b.x, b.y);
               setState(() {});
             },
@@ -1117,12 +1533,16 @@ class _MapScreenState extends State<MapScreen>
               final beforeWins = c.battlesWon;
               await Navigator.push(context, MaterialPageRoute(
                   builder: (_) => PreBattleScreen(
-                      campaign: c, localeNotifier: widget.localeNotifier)));
+                      campaign: c, localeNotifier: widget.localeNotifier,
+                      enemyStrength: b.strength)));
               if (c.battlesWon > beforeWins) {
                 c.bandits.removeParty(b.id);
                 final done = c.reportBanditsKilled(b.name);
-                if (done.isNotEmpty && mounted) {
-                  _showContractDone(done);
+                // Przynęta — czy banda była blisko miasta-celu?
+                final baitDone = c.checkBaitBattle(b.x, b.y);
+                final all = [...done, ...baitDone];
+                if (all.isNotEmpty && mounted) {
+                  _showContractDone(all);
                 }
               }
               if (mounted) setState(() {});
@@ -1135,6 +1555,352 @@ class _MapScreenState extends State<MapScreen>
       ],
     ));
   }
+
+  /// Walka z hersztem listu gończego (silny przeciwnik). Po wygranej zalicza.
+  /// Pobór podatków siłą — wioska stawia opór, walka z wartą.
+  void _startTaxBattle(Contract ct, Settlement village) {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      backgroundColor: MColors.panelBg,
+      shape: const RoundedRectangleBorder(
+        side: BorderSide(color: MColors.ember, width: 2)),
+      title: Text('💰 ${village.name} stawia opór',
+          style: MFonts.label(const TextStyle(color: MColors.ember,
+              fontSize: 15, letterSpacing: 1))),
+      content: Column(mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Wioska nie ceni cię na tyle, by płacić dobrowolnie. '
+             'Warta broni skarbca — pokonaj ją, by zebrać podatek.',
+            style: MFonts.body(const TextStyle(
+                color: MColors.bone, fontSize: 13, height: 1.4))),
+        const SizedBox(height: 10),
+        Text('Podatek: ${ct.taxAmount}🪙 (zatrzymasz 30%)',
+            style: MFonts.body(const TextStyle(
+                color: MColors.goldBright, fontSize: 12))),
+      ]),
+      actions: [
+        TextButton(
+          onPressed: () { Navigator.pop(ctx); _pendingTax = null; },
+          child: Text('ODPUŚĆ', style: MFonts.label(const TextStyle(
+              color: MColors.muted, letterSpacing: 1)))),
+        ElevatedButton(
+          onPressed: () async {
+            Navigator.pop(ctx);
+            final beforeWins = c.battlesWon;
+            await Navigator.push(context, MaterialPageRoute(
+                builder: (_) => PreBattleScreen(
+                    campaign: c, localeNotifier: widget.localeNotifier,
+                    scenario: BattleScenario.villageRaid)));
+            if (c.battlesWon > beforeWins) {
+              c.collectTaxByForce(ct);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text('Podatek zebrany! Zanieś go do zleceniodawcy.'),
+                  backgroundColor: MColors.gold));
+              }
+            }
+            _pendingTax = null;
+            if (mounted) setState(() {});
+          },
+          style: ElevatedButton.styleFrom(
+            backgroundColor: MColors.ember.withValues(alpha: 0.2),
+            foregroundColor: MColors.ember,
+            side: const BorderSide(color: MColors.ember)),
+          child: const Text('Wymuś')),
+      ],
+    ));
+  }
+
+  void _startBountyBattle(Contract bounty) {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      backgroundColor: MColors.panelBg,
+      shape: const RoundedRectangleBorder(
+        side: BorderSide(color: MColors.ember, width: 2)),
+      title: Row(children: [
+        const Text('💀 ', style: TextStyle(fontSize: 22)),
+        Expanded(child: Text(bounty.targetName,
+            style: MFonts.label(const TextStyle(color: MColors.ember,
+                fontSize: 16, letterSpacing: 1)))),
+      ]),
+      content: Column(mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Wytropiłeś hersztа! Jego banda jest silniejsza od zwykłych '
+             'rozbójników. Rozbij ją, by wypełnić list gończy.',
+            style: MFonts.body(const TextStyle(
+                color: MColors.bone, fontSize: 13, height: 1.4))),
+        const SizedBox(height: 10),
+        Text('Nagroda: ${bounty.rewardGold}🪙 + ${bounty.rewardReputation} sławy',
+            style: MFonts.body(const TextStyle(
+                color: MColors.goldBright, fontSize: 12))),
+      ]),
+      actions: [
+        TextButton(
+          onPressed: () {
+            Navigator.pop(ctx);
+            _pendingBounty = null; // odłóż walkę, można wrócić
+          },
+          child: Text('WYCOFAJ SIĘ', style: MFonts.label(const TextStyle(
+              color: MColors.muted, letterSpacing: 1)))),
+        ElevatedButton(
+          onPressed: () async {
+            Navigator.pop(ctx);
+            final beforeWins = c.battlesWon;
+            await Navigator.push(context, MaterialPageRoute(
+                settings: const RouteSettings(name: '/battle'),
+                builder: (_) => PreBattleScreen(
+                    campaign: c, localeNotifier: widget.localeNotifier)));
+            if (c.battlesWon > beforeWins) {
+              c.completeBounty(bounty);
+              if (mounted) _showContractDone([bounty]);
+            }
+            _pendingBounty = null;
+            if (mounted) setState(() {});
+          },
+          style: ElevatedButton.styleFrom(
+            backgroundColor: MColors.ember.withValues(alpha: 0.2),
+            foregroundColor: MColors.ember,
+            side: const BorderSide(color: MColors.ember)),
+          child: const Text('Atakuj!')),
+      ],
+    ));
+  }
+
+  // ── Podgląd aktywnych zleceń ─────────────────────────────────────────────
+  void _showActiveContracts() {
+    final taken = c.takenContracts;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: MColors.panelBg,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(0))),
+      builder: (ctx) => SafeArea(child: ConstrainedBox(
+        constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(ctx).size.height * 0.8),
+        child: SingleChildScrollView(child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              const Text('📜 ', style: TextStyle(fontSize: 20)),
+              Expanded(child: Text('PODJĘTE ZLECENIA',
+                  style: MFonts.label(const TextStyle(color: MColors.cream,
+                      fontSize: 15, letterSpacing: 1.5)))),
+              Text('${taken.length}', style: MFonts.label(const TextStyle(
+                  color: MColors.goldBright, fontSize: 18))),
+            ]),
+            const SizedBox(height: 14),
+            if (taken.isEmpty)
+              Text('Nie masz podjętych zleceń. Znajdziesz je u starostów '
+                   'w miastach i wioskach.',
+                  style: MFonts.body(const TextStyle(
+                      color: MColors.muted, fontSize: 12))),
+            ...taken.map((ct) => _activeContractRow(ct)),
+          ]),
+        )),
+      )),
+    );
+  }
+
+  Widget _activeContractRow(Contract ct) {
+    final left = ct.daysLeft(c.day);
+    final urgent = left <= 3;
+    // Status i podpowiedź co robić
+    String hint;
+    if (ct.hasSearchArea) {
+      hint = ct.revealed
+          ? 'Cel odkryty — dotrzyj do znacznika na mapie'
+          : 'Przeszukaj oznaczony obszar na mapie';
+    } else if (ct.kind == ContractKind.supplyGrain) {
+      final have = c.resourceCount(Resource.grain);
+      hint = 'Zawieź $have/${ct.cargoAmount} zboża do ${ct.targetName}';
+    } else if (ct.kind == ContractKind.supplyIngots) {
+      final have = c.resourceCount(Resource.ingot);
+      hint = 'Zawieź $have/${ct.cargoAmount} sztab do ${ct.targetName}';
+    } else if (ct.kind == ContractKind.supplyHides) {
+      final have = c.resourceCount(Resource.hide);
+      hint = 'Zawieź $have/${ct.cargoAmount} skór do ${ct.targetName}';
+    } else if (ct.kind == ContractKind.sabotage) {
+      hint = 'Napadnij ${ct.targetName} (nie przejmuj)';
+    } else if (ct.kind == ContractKind.rescueCaptives) {
+      hint = 'Odbij jeńców w ${ct.targetName}';
+    } else if (ct.kind == ContractKind.collectTax) {
+      hint = ct.taxCollected
+          ? 'Podatek zebrany — wróć do zleceniodawcy'
+          : 'Odbierz podatek z ${ct.targetName}';
+    } else if (ct.kind == ContractKind.bait) {
+      hint = 'Zwab bandę pod ${ct.targetName} i tam ją rozbij';
+    } else if (ct.kind == ContractKind.training) {
+      hint = TrainingCond.desc(ct.trainingCond);
+    } else if (ct.targetId != null) {
+      hint = 'Cel: ${ct.targetName}';
+    } else {
+      hint = ct.plDesc;
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: MColors.bg.withValues(alpha: 0.4),
+        border: Border.all(color: urgent
+            ? MColors.ember.withValues(alpha: 0.6) : MColors.border),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Text(ct.kind.emoji, style: const TextStyle(fontSize: 16)),
+          const SizedBox(width: 8),
+          Expanded(child: Text(ct.kind.plName, style: MFonts.label(
+              const TextStyle(color: MColors.bone, fontSize: 14,
+                  letterSpacing: 0.5)))),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Text('${ct.rewardGold}', style: MFonts.label(const TextStyle(
+                color: MColors.goldBright, fontSize: 13))),
+            const Text(' 🪙', style: TextStyle(fontSize: 11)),
+          ]),
+        ]),
+        const SizedBox(height: 4),
+        Text(hint, style: MFonts.body(const TextStyle(
+            color: MColors.muted, fontSize: 11, height: 1.3))),
+        const SizedBox(height: 6),
+        Row(children: [
+          Text('⏳ $left dni', style: MFonts.label(TextStyle(
+              fontSize: 11,
+              color: urgent ? MColors.ember : MColors.faint,
+              letterSpacing: 0.5))),
+          if (ct.rewardPerkIndex != null) ...[
+            const Spacer(),
+            const Text('⭐ perk', style: TextStyle(
+                color: MColors.goldBright, fontSize: 11)),
+          ],
+        ]),
+      ]),
+    );
+  }
+
+  // ── Sława i fabuła ─────────────────────────────────────────────────────────
+  void _showReputation() {
+    final ch = c.chapter;
+    final next = c.nextChapter;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: MColors.panelBg,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(0))),
+      builder: (ctx) => SafeArea(child: ConstrainedBox(
+        constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(ctx).size.height * 0.85),
+        child: SingleChildScrollView(child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Transform.rotate(angle: 0.785, child: Container(
+                width: 9, height: 9, color: MColors.gold)),
+            const SizedBox(width: 10),
+            Expanded(child: Text('SŁAWA I DZIEJE', style: MFonts.label(
+                const TextStyle(color: MColors.cream, fontSize: 15,
+                    letterSpacing: 2)))),
+            Text('${c.reputation}', style: MFonts.label(const TextStyle(
+                color: MColors.goldBright, fontSize: 20))),
+          ]),
+          const SizedBox(height: 16),
+          // Aktualny rozdział
+          Text(ch.plName, style: MFonts.display(const TextStyle(
+              color: MColors.goldBright, fontSize: 24))),
+          const SizedBox(height: 8),
+          Text(ch.plDesc, style: MFonts.body(const TextStyle(
+              color: MColors.parchment, fontSize: 13, height: 1.5))),
+          const SizedBox(height: 18),
+          if (next != null) ...[
+            Text('NASTĘPNY ROZDZIAŁ', style: MFonts.label(const TextStyle(
+                color: MColors.dim, fontSize: 11, letterSpacing: 2))),
+            const SizedBox(height: 6),
+            Row(children: [
+              Expanded(child: Text(next.plName, style: MFonts.label(
+                  const TextStyle(color: MColors.bone, fontSize: 15,
+                      letterSpacing: 0.5)))),
+              Text('${next.requiredReputation} sławy',
+                  style: MFonts.label(const TextStyle(
+                      color: MColors.faint, fontSize: 12))),
+            ]),
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(0),
+              child: LinearProgressIndicator(
+                value: c.chapterProgress,
+                minHeight: 5,
+                backgroundColor: MColors.border,
+                valueColor: const AlwaysStoppedAnimation(MColors.gold)),
+            ),
+            if (next.requiresSettlement && c.ownedSettlements.isEmpty) ...[
+              const SizedBox(height: 6),
+              Text('Wymaga też własnej osady',
+                  style: MFonts.body(const TextStyle(
+                      color: MColors.muted, fontSize: 11))),
+            ],
+          ] else
+            Text('Osiągnąłeś szczyt sławy.', style: MFonts.body(
+                const TextStyle(color: MColors.gold, fontSize: 13))),
+          const SizedBox(height: 18),
+          Container(height: 1, color: MColors.borderDim),
+          const SizedBox(height: 12),
+          Text('Sławę zdobywasz wypełniając zlecenia. Znajdziesz je '
+               'u starostów w miastach i wioskach.',
+              style: MFonts.body(const TextStyle(
+                  color: MColors.muted, fontSize: 12, height: 1.5))),
+          const SizedBox(height: 18),
+          Container(height: 1, color: MColors.borderDim),
+          const SizedBox(height: 12),
+          Text('PERKI KOMPANII', style: MFonts.label(const TextStyle(
+              color: MColors.dim, fontSize: 11, letterSpacing: 2))),
+          const SizedBox(height: 8),
+          ...CompanyPerk.values.map((perk) {
+            final has = c.perks.has(perk);
+            final prog = c.perks.progressOf(perk);
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                Text(perk.emoji, style: TextStyle(fontSize: 18,
+                    color: has ? null : MColors.dim)),
+                const SizedBox(width: 10),
+                Expanded(child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Expanded(child: Text(perk.plName, style: MFonts.label(
+                        TextStyle(fontSize: 14, letterSpacing: 0.5,
+                            color: has ? MColors.goldBright : MColors.muted)))),
+                    if (has) Text('✓', style: const TextStyle(
+                        color: MColors.greenBright, fontSize: 14)),
+                  ]),
+                  Text(perk.effect, style: MFonts.body(const TextStyle(
+                      color: MColors.faint, fontSize: 11))),
+                  const SizedBox(height: 3),
+                  if (!has) ...[
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(0),
+                      child: LinearProgressIndicator(
+                        value: (prog / perk.target).clamp(0.0, 1.0),
+                        minHeight: 3,
+                        backgroundColor: MColors.border,
+                        valueColor: const AlwaysStoppedAnimation(MColors.gold)),
+                    ),
+                    const SizedBox(height: 2),
+                    Text('${perk.howTo}  ($prog/${perk.target})',
+                        style: MFonts.body(const TextStyle(
+                            color: MColors.dim, fontSize: 10))),
+                  ],
+                ])),
+              ]),
+            );
+          }),
+        ]),
+      )))),
+    );
+  }
+
+  // ── Sława i fabuła ─── koniec
 
   // ── Frakcje ──────────────────────────────────────────────────────────────
   void _showFactions() {
@@ -1185,7 +1951,7 @@ class _MapScreenState extends State<MapScreen>
         border: Border.all(
             color: rel.defeated ? MColors.borderDim : col,
             width: isMine ? 2 : 1),
-        borderRadius: BorderRadius.circular(8)),
+        borderRadius: BorderRadius.circular(0)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Text(f.emoji, style: const TextStyle(fontSize: 20)),
@@ -1207,7 +1973,7 @@ class _MapScreenState extends State<MapScreen>
             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
             decoration: BoxDecoration(
               color: col.withValues(alpha: 0.2),
-              borderRadius: BorderRadius.circular(4)),
+              borderRadius: BorderRadius.circular(0)),
             child: const Text('TWOJA', style: TextStyle(
                 color: MColors.gold, fontSize: 9,
                 fontWeight: FontWeight.bold)),
@@ -1254,7 +2020,7 @@ class _MapScreenState extends State<MapScreen>
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   border: Border.all(color: MColors.red.withValues(alpha: 0.6)),
-                  borderRadius: BorderRadius.circular(5)),
+                  borderRadius: BorderRadius.circular(0)),
                 child: const Text('Zerwij przysięgę', style: TextStyle(
                     color: MColors.red, fontSize: 11)),
               ),
@@ -1268,7 +2034,7 @@ class _MapScreenState extends State<MapScreen>
                 decoration: BoxDecoration(
                   color: col.withValues(alpha: 0.15),
                   border: Border.all(color: col),
-                  borderRadius: BorderRadius.circular(5)),
+                  borderRadius: BorderRadius.circular(0)),
                 child: Text('⚑ Złóż przysięgę', style: TextStyle(
                     color: col, fontSize: 12, fontWeight: FontWeight.bold)),
               ),
@@ -1347,7 +2113,7 @@ class _MapScreenState extends State<MapScreen>
       decoration: BoxDecoration(
         color: MColors.gold.withValues(alpha: 0.07),
         border: Border.all(color: MColors.gold.withValues(alpha: 0.35)),
-        borderRadius: BorderRadius.circular(6)),
+        borderRadius: BorderRadius.circular(0)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(ch.plName, style: const TextStyle(color: MColors.gold,
             fontSize: 13, fontWeight: FontWeight.bold)),
@@ -1385,7 +2151,7 @@ class _MapScreenState extends State<MapScreen>
                        : Colors.transparent,
         border: Border.all(color: isTaken
             ? MColors.green.withValues(alpha: 0.5) : MColors.borderDim),
-        borderRadius: BorderRadius.circular(7)),
+        borderRadius: BorderRadius.circular(0)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Text(ct.kind.emoji, style: const TextStyle(fontSize: 18)),
@@ -1435,20 +2201,20 @@ class _MapScreenState extends State<MapScreen>
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
                   border: Border.all(color: MColors.red.withValues(alpha: 0.6)),
-                  borderRadius: BorderRadius.circular(4)),
+                  borderRadius: BorderRadius.circular(0)),
                 child: const Text('Porzuć', style: TextStyle(
                     color: MColors.red, fontSize: 10)),
               ),
             )
           else
             GestureDetector(
-              onTap: () { c.acceptContract(ct); setS(() {}); setState(() {}); },
+              onTap: () { c.acceptContract(ct); c.tutorialTookContract(); setS(() {}); setState(() {}); },
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                 decoration: BoxDecoration(
                   color: MColors.green.withValues(alpha: 0.14),
                   border: Border.all(color: MColors.green),
-                  borderRadius: BorderRadius.circular(4)),
+                  borderRadius: BorderRadius.circular(0)),
                 child: const Text('Podejmij', style: TextStyle(
                     color: MColors.green, fontSize: 11,
                     fontWeight: FontWeight.bold)),
@@ -1466,7 +2232,7 @@ class _MapScreenState extends State<MapScreen>
     showDialog(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: MColors.panelBg,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(0),
         side: const BorderSide(color: MColors.green, width: 2)),
       title: const Text('📜 Zlecenie wykonane!',
           style: TextStyle(color: MColors.green, fontSize: 16,
@@ -1502,7 +2268,7 @@ class _MapScreenState extends State<MapScreen>
       showDialog(context: context, builder: (ctx) => AlertDialog(
         backgroundColor: MColors.panelBg,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(0),
           side: BorderSide(color: MColors.muted.withValues(alpha: 0.6))),
         title: const Text('🕸 Splądrowane',
             style: TextStyle(color: MColors.muted, fontSize: 15,
@@ -1590,7 +2356,7 @@ class _MapScreenState extends State<MapScreen>
     showDialog(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: MColors.panelBg,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(0),
         side: BorderSide(color: color, width: 1.5)),
       title: Text(title, style: TextStyle(color: color, fontSize: 16,
           fontWeight: FontWeight.bold)),
@@ -1639,7 +2405,7 @@ class _MapScreenState extends State<MapScreen>
     showDialog(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: MColors.panelBg,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(0),
         side: const BorderSide(color: MColors.green, width: 2)),
       title: Row(children: [
         const Text('🏆 ', style: TextStyle(fontSize: 22)),
@@ -1724,9 +2490,6 @@ class _MapScreenState extends State<MapScreen>
       barrierDismissible: true,
       barrierColor: Colors.black.withValues(alpha: 0.88),
       builder: (ctx) {
-        Timer(const Duration(milliseconds: 2800), () {
-          if (ctx.mounted) Navigator.of(ctx).pop();
-        });
         return Dialog(
             backgroundColor: Colors.transparent,
             elevation: 0,
@@ -1734,17 +2497,16 @@ class _MapScreenState extends State<MapScreen>
               padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 22),
               decoration: BoxDecoration(
                 color: MColors.panelBg,
-                border: Border.all(color: MColors.gold.withValues(alpha: 0.6)),
-                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: MColors.borderGold),
+                borderRadius: BorderRadius.circular(0),
               ),
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 const Text('🌙', style: TextStyle(fontSize: 46)),
                 const SizedBox(height: 8),
-                const Text('Noc w obozie',
-                    style: TextStyle(color: MColors.cream, fontSize: 19,
-                        fontWeight: FontWeight.bold)),
-                Text('Dzień $day',
-                    style: const TextStyle(color: MColors.muted, fontSize: 12)),
+                Text('Noc w obozie', style: MFonts.display(const TextStyle(
+                    color: MColors.cream, fontSize: 22))),
+                Text('DZIEŃ $day', style: MFonts.label(const TextStyle(
+                    color: MColors.faint, fontSize: 12, letterSpacing: 2))),
                 const SizedBox(height: 16),
                 _restLine('🪙 Żołd', '−${spent + taxIncome}'),
                 if (taxIncome > 0)
@@ -1768,9 +2530,23 @@ class _MapScreenState extends State<MapScreen>
                       style: TextStyle(color: MColors.red, fontSize: 12,
                           fontWeight: FontWeight.bold)),
                 ),
-                const SizedBox(height: 14),
-                const Text('(dotknij aby zamknąć)',
-                    style: TextStyle(color: MColors.muted, fontSize: 10)),
+                const SizedBox(height: 18),
+                GestureDetector(
+                  onTap: () => Navigator.of(ctx).pop(),
+                  behavior: HitTestBehavior.opaque,
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: MColors.gold.withValues(alpha: 0.12),
+                      border: Border.all(color: MColors.borderGold),
+                    ),
+                    child: Text('DALEJ', style: MFonts.label(const TextStyle(
+                        color: MColors.goldBright, fontSize: 14,
+                        letterSpacing: 2.5))),
+                  ),
+                ),
               ]),
             ),
           );
@@ -1782,13 +2558,18 @@ class _MapScreenState extends State<MapScreen>
           : _ticker.lastElapsedDuration!.inMicroseconds / 1e6;
       _ticker.forward();
       setState(() {});
-      // Wyniki najazdów i nowe zapowiedzi
+      // Wyniki najazdów i wszystkie nadchodzące zagrożenia
       final outcomes = c.lastRaidOutcomes;
-      final announced = c.lastAnnouncedRaids;
+      // Wszystkie aktywne najazdy (także zapowiedziane wcześniej, jeszcze nie
+      // rozstrzygnięte) — żeby zagrożenie nie znikało z oczu po kolejnym dniu.
+      final allPending = c.raids.active
+          .where((r) => !r.isImminent(c.day))
+          .toList()
+        ..sort((a, b) => a.strikesOnDay.compareTo(b.strikesOnDay));
       if (outcomes.isNotEmpty) {
-        _showRaidOutcomes(outcomes, announced);
-      } else if (announced.isNotEmpty) {
-        _showRaidWarning(announced);
+        _showRaidOutcomes(outcomes, allPending);
+      } else if (allPending.isNotEmpty) {
+        _showRaidWarning(allPending);
       }
     });
   }
@@ -1806,7 +2587,7 @@ class _MapScreenState extends State<MapScreen>
     showDialog(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: MColors.panelBg,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(0),
         side: BorderSide(color: color, width: 2)),
       title: Text(allHeld ? '🛡 Obroniono!' : '💀 Najazd',
           style: TextStyle(color: color, fontSize: 16,
@@ -1871,7 +2652,7 @@ class _MapScreenState extends State<MapScreen>
     showDialog(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: MColors.panelBg,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(0),
         side: const BorderSide(color: MColors.red, width: 2)),
       title: const Text('⚠ Zwiadowcy donoszą',
           style: TextStyle(color: MColors.red, fontSize: 16,
@@ -1955,8 +2736,8 @@ class _MapScreenState extends State<MapScreen>
                 margin: const EdgeInsets.only(bottom: 8),
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  border: Border.all(color: MColors.borderDim),
-                  borderRadius: BorderRadius.circular(6)),
+                  border: Border.all(color: MColors.border),
+                  borderRadius: BorderRadius.circular(0)),
                 child: Row(children: [
                   Text(type.emoji, style: const TextStyle(fontSize: 22)),
                   const SizedBox(width: 10),
@@ -1986,68 +2767,7 @@ class _MapScreenState extends State<MapScreen>
     );
   }
 
-  void _showFoodShop(Settlement s) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: MColors.panelBg,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(12))),
-      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
-        final daily = c.dailyFoodNeeded;
-        return SafeArea(child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              const Expanded(child: Text('Prowiantnia',
-                  style: TextStyle(color: MColors.cream, fontSize: 15,
-                      fontWeight: FontWeight.bold))),
-              Text('Zużycie: $daily/dzień',
-                  style: const TextStyle(color: MColors.muted, fontSize: 11)),
-            ]),
-            const SizedBox(height: 4),
-            Text('Morale: ${c.campaignMorale.round()}/100  |  🪙 ${c.gold}',
-                style: TextStyle(
-                    color: c.campaignMorale > 60 ? MColors.green : MColors.red,
-                    fontSize: 11)),
-            const SizedBox(height: 12),
-            ...FoodType.values.where((ft) =>
-                (s.type == SettlementType.city ? ft.soldInCity : ft.soldInVillage) &&
-                s.foodAvailable(ft, c.day) > 0)
-              .map((ft) {
-              final stock = c.foodUnits(ft);
-              final days5 = daily * 5;
-              return Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  border: Border.all(color: MColors.borderDim),
-                  borderRadius: BorderRadius.circular(6)),
-                child: Row(children: [
-                  Text(ft.emoji, style: const TextStyle(fontSize: 22)),
-                  const SizedBox(width: 10),
-                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                    Text(ft.plName, style: const TextStyle(color: MColors.cream,
-                        fontSize: 13, fontWeight: FontWeight.bold)),
-                    Text('${ft.costPerUnit}🪙 · masz: $stock · w sklepie: ${c.shopFoodAvail(s, ft)}',
-                        style: const TextStyle(color: MColors.muted, fontSize: 10)),
-                  ])),
-                  _shopBtn('+1d', c.gold >= ft.costPerUnit * daily && c.shopFoodAvail(s, ft) >= daily, () {
-                    c.buyFoodFrom(s, ft, daily); setS(() {}); setState(() {});
-                  }),
-                  const SizedBox(width: 5),
-                  _shopBtn('+5d', c.gold >= ft.costPerUnit * days5 && c.shopFoodAvail(s, ft) >= days5, () {
-                    c.buyFoodFrom(s, ft, days5); setS(() {}); setState(() {});
-                  }),
-                ]),
-              );
-            }),
-          ]),
-        ));
-      }),
-    );
-  }
+
 
   Widget _shopBtn(String label, bool enabled, VoidCallback onTap) =>
       GestureDetector(
@@ -2059,7 +2779,7 @@ class _MapScreenState extends State<MapScreen>
                            : Colors.transparent,
             border: Border.all(
                 color: enabled ? MColors.green : MColors.borderDim),
-            borderRadius: BorderRadius.circular(4)),
+            borderRadius: BorderRadius.circular(0)),
           child: Text(label, style: TextStyle(
               color: enabled ? MColors.green : MColors.muted,
               fontSize: 11, fontWeight: FontWeight.bold)),
@@ -2075,6 +2795,8 @@ class _WorldPainter extends CustomPainter {
   final Settlement? selected;
   final Set<String> ownedIds;
   final Set<String> threatenedIds;
+  /// Zlecenia obszarowe do narysowania (środek, promień, czy odkryte, pozycja celu).
+  final List<Contract> searchAreas;
 
   const _WorldPainter({
     required this.map, required this.bandits,
@@ -2082,6 +2804,7 @@ class _WorldPainter extends CustomPainter {
     required this.selected,
     required this.ownedIds,
     required this.threatenedIds,
+    required this.searchAreas,
   });
 
   Offset _w2s(double wx, double wy, Size v) => Offset(
@@ -2093,6 +2816,7 @@ class _WorldPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     _drawTerrain(canvas, size);
     _drawWorldBorder(canvas, size);
+    _drawSearchAreas(canvas, size); // obszary poszukiwań pod osadami
     for (final s in map.settlements) _drawSettlement(canvas, s, size);
     for (final b in bandits.parties)  _drawBandit(canvas, b, size);
     if (map.isMoving) _drawDestination(canvas, size);
@@ -2125,7 +2849,22 @@ class _WorldPainter extends CustomPainter {
             wx >= WorldMap.worldW || wy >= WorldMap.worldH;
         Color color;
         if (outside) {
-          color = const Color(0xFF0E1408);
+          // Poza mapą: rozciągnij teren z najbliższej krawędzi i przyciemnij,
+          // żeby nie było czarnej pustki, ale granica była wyczuwalna.
+          final edgeX = wx.clamp(0.0, WorldMap.worldW - 1);
+          final edgeY = wy.clamp(0.0, WorldMap.worldH - 1);
+          final biome = map.biomeAt(edgeX, edgeY);
+          final base = Color(biome.colorLo);
+          // Im dalej od krawędzi, tym ciemniej (płynne wygaszenie)
+          final distOut = [
+            wx < 0 ? -wx : (wx >= WorldMap.worldW ? wx - WorldMap.worldW : 0.0),
+            wy < 0 ? -wy : (wy >= WorldMap.worldH ? wy - WorldMap.worldH : 0.0),
+          ].reduce((a, b) => a > b ? a : b);
+          final fade = (1.0 - distOut / 1500).clamp(0.35, 1.0);
+          color = Color.fromARGB(255,
+              ((base.value >> 16 & 0xFF) * fade).round(),
+              ((base.value >> 8 & 0xFF) * fade).round(),
+              ((base.value & 0xFF) * fade).round());
         } else {
           final biome = map.biomeAt(
             wx.clamp(0.0, WorldMap.worldW - 1),
@@ -2149,6 +2888,64 @@ class _WorldPainter extends CustomPainter {
           ..strokeWidth = 2);
   }
 
+  /// Rysuje obszary poszukiwań zleceń (karawana, list gończy).
+  void _drawSearchAreas(Canvas canvas, Size size) {
+    for (final ct in searchAreas) {
+      final center = _w2s(ct.areaX, ct.areaY, size);
+      final r = ct.areaRadius * scale;
+      final color = ct.kind == ContractKind.findCaravan
+          ? const Color(0xFFC9A84C)  // złoty — karawana
+          : const Color(0xFFC0492A); // żar — list gończy
+
+      if (!ct.revealed) {
+        // Przerywany okrąg obszaru poszukiwań
+        _dashedCircle(canvas, center, r, color.withValues(alpha: 0.55), 2.0);
+        // Delikatne wypełnienie
+        canvas.drawCircle(center, r,
+            Paint()..color = color.withValues(alpha: 0.05));
+        // Etykieta w środku
+        final tp = TextPainter(
+          text: TextSpan(
+            text: ct.kind == ContractKind.findCaravan ? '🐫' : '💀',
+            style: const TextStyle(fontSize: 16)),
+          textDirection: TextDirection.ltr)..layout();
+        tp.paint(canvas, center - Offset(tp.width / 2, tp.height / 2));
+      } else {
+        // Cel odkryty — marker w konkretnym punkcie
+        final tgt = _w2s(ct.targetX, ct.targetY, size);
+        // Pulsujący pierścień
+        canvas.drawCircle(tgt, 14, Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke..strokeWidth = 2.5);
+        canvas.drawCircle(tgt, 8, Paint()..color = color);
+        final tp = TextPainter(
+          text: TextSpan(
+            text: ct.kind == ContractKind.findCaravan ? '🐫' : '💀',
+            style: const TextStyle(fontSize: 13)),
+          textDirection: TextDirection.ltr)..layout();
+        tp.paint(canvas, tgt - Offset(tp.width / 2, tp.height / 2));
+      }
+    }
+  }
+
+  /// Rysuje przerywany okrąg (segmenty łuku).
+  void _dashedCircle(Canvas canvas, Offset center, double radius,
+      Color color, double width) {
+    if (radius < 4) return;
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = width;
+    const segments = 40;
+    final dashAngle = (2 * pi / segments) * 0.6; // 60% kreska, 40% przerwa
+    for (var i = 0; i < segments; i++) {
+      final start = (2 * pi / segments) * i;
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius),
+        start, dashAngle, false, paint);
+    }
+  }
+
   void _drawSettlement(Canvas canvas, Settlement s, Size size) {
     final p = _w2s(s.x, s.y, size);
     if (p.dx < -40 || p.dx > size.width + 40 ||
@@ -2160,10 +2957,13 @@ class _WorldPainter extends CustomPainter {
 
     canvas.drawCircle(Offset(p.dx + 2, p.dy + 2), r,
         Paint()..color = const Color(0x55000000));
-    // Kolor osady: frakcja ma pierwszeństwo przed typem
-    final baseColor = s.faction == Faction.none
-        ? Color(s.type.mapColor)
-        : Color(s.faction.color);
+    // Kolor wypełnienia: zdobyta = kolor gracza (żar), inaczej frakcja/typ
+    final owned = ownedIds.contains(s.id);
+    final baseColor = owned
+        ? MColors.playerLand
+        : s.faction == Faction.none
+            ? Color(s.type.mapColor)
+            : Color(s.faction.color);
     canvas.drawCircle(p, r, Paint()..color = baseColor);
     // Stolica — złoty pierścień
     if (s.isCapital) {
@@ -2172,10 +2972,10 @@ class _WorldPainter extends CustomPainter {
         ..style = PaintingStyle.stroke..strokeWidth = 2);
     }
     canvas.drawCircle(p, r, Paint()
-      ..color = ownedIds.contains(s.id) ? MColors.green
+      ..color = owned ? MColors.goldBright
                : isHere ? Colors.white : (isSel ? MColors.gold : Colors.black38)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = ownedIds.contains(s.id) ? 3.0 : (isHere || isSel ? 2.5 : 1.2));
+      ..strokeWidth = owned ? 2.5 : (isHere || isSel ? 2.5 : 1.2));
 
     final tp = TextPainter(
       text: TextSpan(text: s.type.emoji,
@@ -2266,4 +3066,41 @@ class _WorldPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_WorldPainter old) => true;
+}
+
+/// Ikona dyskietki (autozapis) — rysowana z kształtów, w duchu stylu gry.
+class _SaveIcon extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: 14, height: 14,
+    child: CustomPaint(painter: _SaveIconPainter()),
+  );
+}
+
+class _SaveIconPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = Paint()..color = MColors.gold..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2;
+    // Obrys dyskietki ze ściętym rogiem
+    final path = Path()
+      ..moveTo(1, 1)
+      ..lineTo(size.width - 3, 1)
+      ..lineTo(size.width - 1, 3)
+      ..lineTo(size.width - 1, size.height - 1)
+      ..lineTo(1, size.height - 1)
+      ..close();
+    canvas.drawPath(path, p);
+    // Etykieta (dolny prostokąt)
+    canvas.drawRect(
+        Rect.fromLTWH(3.5, size.height - 5, size.width - 7, 4),
+        Paint()..color = MColors.gold);
+    // Zasuwka (górny prawy)
+    canvas.drawRect(
+        Rect.fromLTWH(size.width - 6, 2, 2.5, 3),
+        Paint()..color = MColors.gold);
+  }
+
+  @override
+  bool shouldRepaint(_) => false;
 }
